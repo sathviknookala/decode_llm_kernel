@@ -1,0 +1,16 @@
+# Local-only working docs (not tracked)
+CLAUDE.md
+docs/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Editor
+.vscode/
+
+# Build artifacts (CUDA extension, later)
+build/
+*.so
+*.egg-info/
