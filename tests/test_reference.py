@@ -1,0 +1,115 @@
+import torch
+import pytest
+
+from decode_kernels.reference import (
+    build_rope_tables,
+    rotate_half,
+    apply_rope,
+    fused_rope_kv_append_ref,
+)
+
+THETA = 10000.0
+
+
+def test_rope_matches_hf_llama():
+    from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
+
+    T, H, D, max_pos = 5, 4, 8, 16
+    cos, sin = build_rope_tables(max_pos, D, THETA)
+    positions = torch.tensor([0, 1, 2, 7, 15])
+    x = torch.randn(T, H, D, dtype=torch.float32)
+
+    mine = apply_rope(x, cos[positions], sin[positions])              # [T,H,D]
+
+    xb = x.permute(1, 0, 2).unsqueeze(0)                             # [1,H,T,D]
+    cosb, sinb = cos[positions].unsqueeze(0), sin[positions].unsqueeze(0)
+    q_hf, _ = apply_rotary_pos_emb(xb, xb, cosb, sinb)              # unsqueeze_dim=1
+    hf = q_hf.squeeze(0).permute(1, 0, 2)
+
+    torch.testing.assert_close(mine, hf, atol=1e-6, rtol=1e-6)
+
+
+def test_rotate_half_and_pairing():
+    D = 8
+    x = torch.arange(D, dtype=torch.float32).reshape(1, 1, D)
+    r = rotate_half(x)
+    # pair i couples dim i with dim i+D/2 -> [-x2, x1]
+    assert torch.equal(r[0, 0], torch.tensor([-4., -5., -6., -7., 0., 1., 2., 3.]))
+
+
+def test_zero_position_is_identity():
+    T, H, D, max_pos = 3, 2, 8, 16
+    cos, sin = build_rope_tables(max_pos, D, THETA)
+    x = torch.randn(T, H, D)
+    out = apply_rope(x, cos[torch.zeros(T, dtype=torch.long)],
+                     sin[torch.zeros(T, dtype=torch.long)])
+    torch.testing.assert_close(out, x)                              # pos 0: cos=1, sin=0
+
+
+def _run_case(dtype, T=4, Hq=8, Hkv=8, D=8, B=4, max_seq=16, theta=THETA):
+    cos, sin = build_rope_tables(max_seq, D, theta)
+    q = torch.randn(T, Hq, D, dtype=dtype)
+    k = torch.randn(T, Hkv, D, dtype=dtype)
+    v = torch.randn(T, Hkv, D, dtype=dtype)
+    positions = torch.arange(T)
+    request_indices = torch.arange(T)
+    k_cache = torch.zeros(B, max_seq, Hkv, D, dtype=dtype)
+    v_cache = torch.zeros(B, max_seq, Hkv, D, dtype=dtype)
+    q_rot = fused_rope_kv_append_ref(q, k, v, positions, cos, sin, k_cache,
+                                     v_cache, request_indices)
+    return locals()
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_returned_q_is_rotated(dtype):
+    c = _run_case(dtype)
+    expect = apply_rope(c["q"].float(), c["cos"][c["positions"]],
+                        c["sin"][c["positions"]]).to(dtype)
+    tol = dict(atol=1e-6, rtol=1e-6) if dtype == torch.float32 else dict(atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(c["q_rot"], expect, **tol)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_cache_slots_receive_rotated_k_and_raw_v(dtype):
+    c = _run_case(dtype)
+    k_exp = apply_rope(c["k"].float(), c["cos"][c["positions"]],
+                       c["sin"][c["positions"]]).to(dtype)
+    for t in range(c["T"]):
+        r, p = c["request_indices"][t], c["positions"][t]
+        torch.testing.assert_close(c["k_cache"][r, p], k_exp[t])
+        torch.testing.assert_close(c["v_cache"][r, p], c["v"][t])       # V unrotated
+
+
+def test_unrelated_cache_entries_unchanged():
+    c = _run_case(torch.float32)
+    written = torch.zeros(c["B"], c["max_seq"], dtype=torch.bool)
+    written[c["request_indices"], c["positions"]] = True
+    # every non-written (b, seq) slot must remain exactly zero
+    assert torch.equal(c["k_cache"][~written], torch.zeros_like(c["k_cache"][~written]))
+    assert torch.equal(c["v_cache"][~written], torch.zeros_like(c["v_cache"][~written]))
+
+
+def test_deterministic():
+    torch.manual_seed(0)
+    c1 = _run_case(torch.float32)
+    torch.manual_seed(0)
+    c2 = _run_case(torch.float32)
+    torch.testing.assert_close(c1["q_rot"], c2["q_rot"])
+    torch.testing.assert_close(c1["k_cache"], c2["k_cache"])
+
+
+def test_gqa_shapes():
+    c = _run_case(torch.float32, Hq=8, Hkv=2)                        # GQA 4:1
+    assert c["q_rot"].shape == (c["T"], 8, c["D"])
+    assert c["k_cache"].shape[2] == 2
+
+
+def test_single_request_and_boundary_positions():
+    cos, sin = build_rope_tables(16, 8, THETA)
+    q = torch.randn(1, 4, 8); k = torch.randn(1, 4, 8); v = torch.randn(1, 4, 8)
+    k_cache = torch.zeros(1, 16, 4, 8); v_cache = torch.zeros(1, 16, 4, 8)
+    for pos in (0, 15):                                             # first and last valid slot
+        kc, vc = k_cache.clone(), v_cache.clone()
+        fused_rope_kv_append_ref(q, k, v, torch.tensor([pos]), cos, sin, kc, vc,
+                                 torch.tensor([0]))
+        assert kc[0, pos].abs().sum() > 0
