@@ -14,3 +14,7 @@ __pycache__/
 build/
 *.so
 *.egg-info/
+
+# Transient benchmark logs / smoke-run CSVs (keep canonical result CSVs)
+results/raw/*.log
+results/raw/*_quick.csv
