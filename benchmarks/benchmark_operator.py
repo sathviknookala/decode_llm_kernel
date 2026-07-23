@@ -53,7 +53,8 @@ def build_inputs(cfg, device):
     q = torch.randn(T, Hq, D, dtype=dt, device=device)
     k = torch.randn(T, Hkv, D, dtype=dt, device=device)
     v = torch.randn(T, Hkv, D, dtype=dt, device=device)
-    cos, sin = build_rope_tables(max_seq, D, theta=10000.0, device=device, dtype=dt)
+    cos, sin = build_rope_tables(max_seq, D, theta=10000.0, device=device,
+                                 dtype=torch.float32)
     positions = torch.full((T,), max_seq - 1, dtype=torch.long, device=device)
     request_indices = torch.arange(T, device=device)
     k_cache = torch.zeros(T, max_seq, Hkv, D, dtype=dt, device=device)

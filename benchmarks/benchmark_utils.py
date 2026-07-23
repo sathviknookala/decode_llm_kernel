@@ -65,7 +65,7 @@ def logical_bytes(num_tokens, num_q_heads, num_kv_heads, head_dim, dtype):
     e = dtype_bytes(dtype)
     q = num_tokens * num_q_heads * head_dim * e
     kv = num_tokens * num_kv_heads * head_dim * e
-    cossin = num_tokens * head_dim * 4 * 2
+    cossin = num_tokens * head_dim * 4
     reads = q + kv + kv + cossin
     writes = q + kv + kv
     return reads + writes
