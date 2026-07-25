@@ -1,6 +1,5 @@
 import torch
 
-
 def build_rope_tables(max_position, head_dim, theta=10000.0, *, device="cpu",
                       dtype=torch.float32):
     assert head_dim % 2 == 0, "head_dim must be even for split-half RoPE"
@@ -12,20 +11,17 @@ def build_rope_tables(max_position, head_dim, theta=10000.0, *, device="cpu",
     emb = torch.cat((freqs, freqs), dim=-1)       # [max_position, head_dim]
     return emb.cos().to(dtype), emb.sin().to(dtype)
 
-
 def rotate_half(x):
     half = x.shape[-1] // 2
     x1 = x[..., :half]
     x2 = x[..., half:]
     return torch.cat((-x2, x1), dim=-1)
 
-
 def apply_rope(x, cos, sin):
     # x: [T, H, D]; cos, sin: [T, D] already gathered at each token's position
     cos = cos.unsqueeze(-2)                       # [T, 1, D] -> broadcast over heads
     sin = sin.unsqueeze(-2)
     return x * cos + rotate_half(x) * sin
-
 
 def fused_rope_kv_append_ref(q, k, v, positions, cos, sin, k_cache, v_cache,
                              request_indices):
