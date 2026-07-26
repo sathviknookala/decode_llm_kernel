@@ -43,6 +43,11 @@ the env JSON; other modes are unexplored.
 **GQA numbers are synthetic.** The anchor model (Llama-2-7B) is pure MHA, so no GQA result
 here is corroborated by a real model.
 
+**Timed rows use the identity request mapping and packed Q/K/V.** Non-identity mappings and
+fused-projection strides are exercised by the validation gate, not by the timing path, so this
+file says nothing about their cost. A strided read is plausibly slower than a packed one; that
+delta is unmeasured.
+
 **The attention consumer is not modelled at all.** This operator only writes the cache. A
 layout or kernel that speeds writes may slow the attention reads that follow, and that
 trade-off is invisible in this file.

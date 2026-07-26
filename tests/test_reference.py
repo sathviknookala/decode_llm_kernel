@@ -104,6 +104,48 @@ def test_gqa_shapes():
     assert c["k_cache"].shape[2] == 2
 
 
+def test_non_identity_request_mapping():
+    cos, sin = build_rope_tables(16, 8, THETA)
+    T, H, D = 4, 4, 8
+    q = torch.randn(T, H, D); k = torch.randn(T, H, D); v = torch.randn(T, H, D)
+    k_cache = torch.zeros(T, 16, H, D); v_cache = torch.zeros(T, 16, H, D)
+    positions = torch.tensor([3, 3, 3, 3])                          # same slot, different rows
+    request_indices = torch.tensor([2, 0, 3, 1])
+    fused_rope_kv_append_ref(q, k, v, positions, cos, sin, k_cache, v_cache, request_indices)
+    k_exp = apply_rope(k.float(), cos[positions], sin[positions])
+    for t in range(T):
+        torch.testing.assert_close(k_cache[request_indices[t], 3], k_exp[t])
+        torch.testing.assert_close(v_cache[request_indices[t], 3], v[t])
+
+
+def test_strided_qkv_from_fused_projection():
+    """Splitting a fused QKV projection gives contiguous head_dim but strided tokens/heads."""
+    cos, sin = build_rope_tables(16, 8, THETA)
+    T, Hq, Hkv, D = 4, 8, 2, 8
+    fused = torch.randn(T, (Hq + 2 * Hkv) * D)
+    q, k, v = [x.view(T, -1, D) for x in fused.split([Hq * D, Hkv * D, Hkv * D], dim=-1)]
+    assert not q.is_contiguous() and q.stride(-1) == 1
+
+    k_cache = torch.zeros(T, 16, Hkv, D); v_cache = torch.zeros(T, 16, Hkv, D)
+    positions = torch.arange(T)
+    q_rot = fused_rope_kv_append_ref(q, k, v, positions, cos, sin, k_cache, v_cache,
+                                     torch.arange(T))
+
+    torch.testing.assert_close(q_rot, apply_rope(q.float(), cos[positions], sin[positions]))
+    k_exp = apply_rope(k.float(), cos[positions], sin[positions])
+    for t in range(T):
+        torch.testing.assert_close(k_cache[t, positions[t]], k_exp[t])
+        torch.testing.assert_close(v_cache[t, positions[t]], v[t])
+
+
+def test_mqa_single_kv_head():
+    c = _run_case(torch.float32, Hq=8, Hkv=1)
+    assert c["q_rot"].shape == (c["T"], 8, c["D"])
+    k_exp = apply_rope(c["k"].float(), c["cos"][c["positions"]], c["sin"][c["positions"]])
+    for t in range(c["T"]):
+        torch.testing.assert_close(c["k_cache"][t, c["positions"][t]], k_exp[t])
+
+
 def test_single_request_and_boundary_positions():
     cos, sin = build_rope_tables(16, 8, THETA)
     q = torch.randn(1, 4, 8); k = torch.randn(1, 4, 8); v = torch.randn(1, 4, 8)

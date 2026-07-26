@@ -99,7 +99,7 @@ def run_config(cfg, device, args_ns, bw_ref_gbps):
         rows.append({**base, "validation": "pass",
                      "validation_detail": (f"q_maxdiff={report['max_abs_diff_q']:.2e} "
                                            f"k_maxdiff={report['max_abs_diff_k_cache']:.2e} "
-                                           f"sets={report['num_position_sets']}"),
+                                           f"cases={report['num_cases']}"),
                      **timed})
     return rows
 

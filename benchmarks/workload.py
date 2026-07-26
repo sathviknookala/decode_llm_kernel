@@ -19,6 +19,14 @@ HEAD_CONFIGS = [
 CACHE_SENTINEL = 7.5
 NUM_POSITION_SETS = 8
 
+PACKED = "packed"
+STRIDED = "strided"
+LAYOUTS = (PACKED, STRIDED)
+
+IDENTITY = "identity"
+PERMUTED = "permuted"
+REQUEST_MAPPINGS = (IDENTITY, PERMUTED)
+
 
 @dataclass(frozen=True)
 class Config:
@@ -60,17 +68,39 @@ def build_position_sets(cfg, seed, device, num_sets=NUM_POSITION_SETS):
                                    cfg.position_mode, seed, num_sets, device)
 
 
-def build_op_args(cfg, device, seed, positions, *, sentinel_cache=False):
+def build_request_mapping(num_requests, kind, seed, device):
+    """Which cache row each token targets. A permuted mapping is a bijection, so slots stay
+    unique while `token index == request index` stops holding."""
+    if kind == IDENTITY:
+        return torch.arange(num_requests, device=device)
+    if kind == PERMUTED:
+        g = torch.Generator().manual_seed(seed + 9973)
+        return torch.randperm(num_requests, generator=g).to(device)
+    raise ValueError(f"unknown request mapping {kind!r}, expected one of {REQUEST_MAPPINGS}")
+
+
+def _build_qkv(t, hq, hkv, d, dt, device, g, layout):
+    if layout == PACKED:
+        return tuple(torch.randn(t, h, d, generator=g, dtype=dt, device=device)
+                     for h in (hq, hkv, hkv))
+    if layout == STRIDED:
+        # views into one fused QKV projection: head_dim contiguous, token stride = fused width
+        fused = torch.randn(t, (hq + 2 * hkv) * d, generator=g, dtype=dt, device=device)
+        parts = fused.split([hq * d, hkv * d, hkv * d], dim=-1)
+        return tuple(p.view(t, -1, d) for p in parts)
+    raise ValueError(f"unknown layout {layout!r}, expected one of {LAYOUTS}")
+
+
+def build_op_args(cfg, device, seed, positions, *, sentinel_cache=False,
+                  request_mapping=IDENTITY, layout=PACKED):
     """Allocate one invocation's tensors. RoPE tables stay FP32 per locked semantics."""
     t, hq, hkv, d = cfg.num_requests, cfg.num_q_heads, cfg.num_kv_heads, cfg.head_dim
     dt = cfg.dtype
     g = torch.Generator(device=device).manual_seed(seed)
-    q = torch.randn(t, hq, d, generator=g, dtype=dt, device=device)
-    k = torch.randn(t, hkv, d, generator=g, dtype=dt, device=device)
-    v = torch.randn(t, hkv, d, generator=g, dtype=dt, device=device)
+    q, k, v = _build_qkv(t, hq, hkv, d, dt, device, g, layout)
     cos, sin = build_rope_tables(cfg.cache_alloc_len, d, theta=10000.0, device=device,
                                  dtype=torch.float32)
-    request_indices = torch.arange(t, device=device)
+    request_indices = build_request_mapping(t, request_mapping, seed, device)
     fill = CACHE_SENTINEL if sentinel_cache else 0.0
     k_cache = torch.full((t, cfg.cache_alloc_len, hkv, d), fill, dtype=dt, device=device)
     v_cache = torch.full((t, cfg.cache_alloc_len, hkv, d), fill, dtype=dt, device=device)
