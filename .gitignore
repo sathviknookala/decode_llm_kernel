@@ -1,6 +1,7 @@
 # Local-only working docs (not tracked)
 CLAUDE.md
 docs/
+README.md
 
 # Python
 __pycache__/
