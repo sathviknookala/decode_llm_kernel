@@ -1,6 +1,8 @@
 import glob
 import os
 
+import torch  # noqa: F401  -- loads libc10/libtorch, without which _ext's symbols do not resolve
+
 BUILD_COMMAND = "python setup.py build_ext --inplace"
 
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))
