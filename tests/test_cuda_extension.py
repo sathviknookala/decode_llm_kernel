@@ -1,5 +1,7 @@
 import importlib
 import os
+import subprocess
+import sys
 
 import pytest
 import torch
@@ -78,6 +80,18 @@ def test_source_discovery_error_names_the_build_command():
 def test_require_explains_how_to_build_when_missing():
     with pytest.raises(RuntimeError, match="build_ext"):
         cuda_ext.require()
+
+
+@requires_ext
+def test_loads_without_the_caller_importing_torch_first():
+    """The .so needs libtorch resident before it loads. If the wrapper relies on the caller
+    having imported torch, is_available() reports False for a built extension -- and callers
+    silently skip instead of failing."""
+    probe = subprocess.run(
+        [sys.executable, "-c", "from decode_kernels import cuda; print(cuda.is_available())"],
+        cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        capture_output=True, text=True)
+    assert probe.stdout.strip() == "True", probe.stdout + probe.stderr
 
 
 @requires_ext
