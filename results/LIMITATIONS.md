@@ -40,8 +40,15 @@ configurations are MHA 32/32 and GQA 32/8 only; MQA is covered in the byte-formu
 not benchmarked. `torch.compile` is measured with one backend and default mode, recorded in
 the env JSON; other modes are unexplored.
 
-**GQA numbers are synthetic.** The anchor model (Llama-2-7B) is pure MHA, so no GQA result
-here is corroborated by a real model.
+**GQA shapes are real; GQA tensors are not.** The swept GQA layout (32 q heads : 8 kv heads,
+`head_dim` 128, `rope_theta` 10000) is the attention shape of **Mistral-7B-v0.1**
+(Apache-2.0, ungated; Jiang et al. 2023, arXiv:2310.06825), cross-checked against its
+published `config.json` by `tests/test_anchor_models.py`, and our RoPE tables are bit-exact
+against `MistralRotaryEmbedding`. That establishes the *configuration* is real, **not** that
+the numbers are: every timed tensor is still synthetic `randn`, no model weights are loaded,
+and no real activation distribution or decode loop is involved. Latency here is dtype- and
+shape-driven, so synthetic inputs are appropriate — but nothing in this file is a measurement
+of Mistral-7B-v0.1 the model.
 
 **Timed rows use the identity request mapping and packed Q/K/V.** Non-identity mappings and
 fused-projection strides are exercised by the validation gate, not by the timing path, so this
