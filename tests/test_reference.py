@@ -29,6 +29,54 @@ def test_rope_matches_hf_llama():
     torch.testing.assert_close(mine, hf, atol=1e-6, rtol=1e-6)
 
 
+def test_rope_matches_hf_mistral():
+    """Mistral ships its own copy of apply_rotary_pos_emb (not an alias of Llama's), and it is
+    the GQA anchor's model family, so parity is asserted against it separately. Rotates Q and
+    K together at the anchor's real 32:8 head split."""
+    from transformers.models.mistral.modeling_mistral import apply_rotary_pos_emb
+
+    T, Hq, Hkv, D, max_pos = 5, 32, 8, 128, 4096
+    cos, sin = build_rope_tables(max_pos, D, THETA)
+    positions = torch.tensor([0, 1, 2, 1023, 4095])
+    q = torch.randn(T, Hq, D, dtype=torch.float32)
+    k = torch.randn(T, Hkv, D, dtype=torch.float32)
+
+    mine_q = apply_rope(q, cos[positions], sin[positions])            # [T,Hq,D]
+    mine_k = apply_rope(k, cos[positions], sin[positions])            # [T,Hkv,D]
+
+    qb = q.permute(1, 0, 2).unsqueeze(0)                             # [1,H,T,D]
+    kb = k.permute(1, 0, 2).unsqueeze(0)
+    cosb, sinb = cos[positions].unsqueeze(0), sin[positions].unsqueeze(0)
+    q_hf, k_hf = apply_rotary_pos_emb(qb, kb, cosb, sinb)            # unsqueeze_dim=1
+
+    torch.testing.assert_close(mine_q, q_hf.squeeze(0).permute(1, 0, 2), atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(mine_k, k_hf.squeeze(0).permute(1, 0, 2), atol=1e-6, rtol=1e-6)
+
+
+def test_fused_op_on_the_gqa_anchors_real_shape():
+    """End-to-end oracle run at Mistral-7B-v0.1's exact attention shape (32:8 @ 128)."""
+    from benchmarks.anchor_models import MISTRAL_7B as m
+
+    T, B, max_seq = 4, 4, 2048
+    cos, sin = build_rope_tables(max_seq, m.head_dim, m.rope_theta)
+    q = torch.randn(T, m.num_q_heads, m.head_dim)
+    k = torch.randn(T, m.num_kv_heads, m.head_dim)
+    v = torch.randn(T, m.num_kv_heads, m.head_dim)
+    positions = torch.tensor([0, 17, 1023, 2047])
+    request_indices = torch.arange(T)
+    k_cache = torch.zeros(B, max_seq, m.num_kv_heads, m.head_dim)
+    v_cache = torch.zeros(B, max_seq, m.num_kv_heads, m.head_dim)
+
+    q_rot = fused_rope_kv_append_ref(q, k, v, positions, cos, sin, k_cache, v_cache,
+                                     request_indices)
+
+    assert q_rot.shape == (T, m.num_q_heads, m.head_dim)
+    k_exp = apply_rope(k.float(), cos[positions], sin[positions])
+    for t in range(T):
+        torch.testing.assert_close(k_cache[request_indices[t], positions[t]], k_exp[t])
+        torch.testing.assert_close(v_cache[request_indices[t], positions[t]], v[t])
+
+
 def test_rotate_half_and_pairing():
     D = 8
     x = torch.arange(D, dtype=torch.float32).reshape(1, 1, D)
