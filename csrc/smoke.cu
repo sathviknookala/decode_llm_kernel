@@ -54,7 +54,7 @@ void smoke_fill(at::Tensor tensor, double value) {
   AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16,
                                   tensor.scalar_type(), "smoke_fill", [&] {
     smoke_fill_kernel<scalar_t><<<blocks, kThreads, 0, stream>>>(
-        tensor.data_ptr<scalar_t>(), numel, static_cast<scalar_t>(static_cast<float>(value)));
+        tensor.data_ptr<scalar_t>(), numel, static_cast<scalar_t>(value));
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
