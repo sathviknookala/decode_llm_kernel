@@ -1,3 +1,5 @@
+import math
+
 import pytest
 import torch
 
@@ -30,6 +32,15 @@ def test_writes_the_requested_value(value):
     cuda_ext.smoke_fill(x, value)
     torch.cuda.synchronize()
     assert torch.equal(x, torch.full_like(x, value))
+
+
+def test_double_tensor_keeps_double_precision():
+    """Regression: the fill value used to be routed through float32 before the final cast,
+    silently truncating precision for a float64 tensor."""
+    x = torch.zeros(64, dtype=torch.float64, device="cuda")
+    cuda_ext.smoke_fill(x, math.pi)
+    torch.cuda.synchronize()
+    assert torch.equal(x, torch.full_like(x, math.pi))
 
 
 @pytest.mark.parametrize("shape", [(1,), (7,), (255,), (256,), (257,), (4, 8, 16), (1, 1, 1)])
