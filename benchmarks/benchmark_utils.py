@@ -198,7 +198,8 @@ def env_metadata(device_index=0, *, cli_args=None, extra=None):
         "gpu_multi_processor_count": props.multi_processor_count,
         "device_index": device_index,
         "nvidia_driver_version": _capture(
-            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"]),
+            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader",
+             f"--id={device_index}"]),
         "cuda_runtime_version_torch": torch.version.cuda,
         "cuda_toolkit_version_nvcc": _nvcc_version(),
         "cudnn_version": torch.backends.cudnn.version(),
