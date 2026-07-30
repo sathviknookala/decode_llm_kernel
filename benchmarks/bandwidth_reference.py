@@ -69,7 +69,7 @@ def measure_bandwidth_reference(device="cuda", buffer_mib=DEFAULT_BUFFER_MIB,
                                 warmup=10, iters=50):
     """Empirical achievable bandwidth on this device. Buffers far exceed L2 so the
     measurement is DRAM-bound rather than cache-resident."""
-    props = torch.cuda.get_device_properties(0)
+    props = torch.cuda.get_device_properties(device)
     copy = measure_copy(device, buffer_mib, warmup, iters)
     triad = measure_triad(device, buffer_mib, warmup, iters)
     return {
