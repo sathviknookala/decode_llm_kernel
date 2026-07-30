@@ -7,14 +7,13 @@ import torch._dynamo
 
 from decode_kernels.reference import build_rope_tables, fused_rope_kv_append_ref
 from benchmarks import positions as pos
+from benchmarks.anchor_models import ANCHOR_MODELS
 
 DTYPES = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
 
-# Llama-2-7B anchor is MHA 32/32 @ head_dim 128; the GQA row is the synthetic 4:1 variant.
-HEAD_CONFIGS = [
-    ("mha", 32, 32, 128),
-    ("gqa", 32, 8, 128),
-]
+# Every swept head layout is a real released model's attention shape: MHA 32/32 @ 128 is
+# Llama-2-7B, GQA 32/8 @ 128 is Mistral-7B-v0.1. Provenance in anchor_models.py.
+HEAD_CONFIGS = [m.head_config() for m in ANCHOR_MODELS]
 
 CACHE_SENTINEL = 7.5
 NUM_POSITION_SETS = 8
