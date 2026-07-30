@@ -228,7 +228,9 @@ def _triton_version():
 
 
 def write_csv(path, rows):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    dirname = os.path.dirname(path)
+    if dirname:
+        os.makedirs(dirname, exist_ok=True)
     if not rows:
         return
     fields = []
@@ -243,6 +245,8 @@ def write_csv(path, rows):
 
 
 def write_json(path, obj):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    dirname = os.path.dirname(path)
+    if dirname:
+        os.makedirs(dirname, exist_ok=True)
     with open(path, "w") as f:
         json.dump(obj, f, indent=2, sort_keys=False, default=str)
