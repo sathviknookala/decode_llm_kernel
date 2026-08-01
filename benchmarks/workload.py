@@ -3,9 +3,8 @@ from dataclasses import dataclass, asdict
 from typing import NamedTuple
 
 import torch
-import torch._dynamo
 
-from decode_kernels.reference import build_rope_tables, fused_rope_kv_append_ref
+from decode_kernels.reference import build_rope_tables
 from benchmarks import positions as pos
 from benchmarks.anchor_models import ANCHOR_MODELS
 
@@ -116,20 +115,6 @@ def make_thunk(fn, args, position_sets):
     def run():
         fn(q, k, v, next(cyc), cos, sin, kc, vc, ri)
     return run
-
-
-def eager_impl():
-    return fused_rope_kv_append_ref
-
-
-def compile_impl(mode=None, backend="inductor"):
-    """Fresh compile per config: dynamo caches on the code object and would otherwise
-    hit recompile_limit mid-sweep and silently fall back to eager."""
-    torch._dynamo.reset()
-    kwargs = {"backend": backend, "dynamic": False}
-    if mode:
-        kwargs["mode"] = mode
-    return torch.compile(fused_rope_kv_append_ref, **kwargs)
 
 
 def build_matrix(quick=False, position_modes=(pos.RAGGED,), head_labels=None,

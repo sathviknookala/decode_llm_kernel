@@ -11,7 +11,8 @@ from benchmarks.validation import (
     validate_once,
     validate_or_raise,
 )
-from benchmarks.workload import IDENTITY, PACKED, Config, eager_impl
+from benchmarks.impls import eager_impl
+from benchmarks.workload import IDENTITY, PACKED, Config
 from decode_kernels.reference import apply_rope
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

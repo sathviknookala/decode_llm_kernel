@@ -1,4 +1,5 @@
 import argparse
+import gc
 import os
 import sys
 
@@ -21,14 +22,12 @@ from benchmarks.benchmark_utils import (
     write_csv,
     write_json,
 )
+from benchmarks.impls import DEFAULT_IMPLS, IMPL_LABELS, resolve_impls
 from benchmarks.validation import validate_candidate
 from benchmarks.workload import (
     build_matrix,
     build_op_args,
     build_position_sets,
-    compile_impl,
-    eager_impl,
-    make_thunk,
 )
 
 DEFAULT_FOOTPRINT_BUDGET_GB = 12.0
@@ -37,8 +36,8 @@ DEFAULT_FOOTPRINT_BUDGET_GB = 12.0
 PEAK_CACHE_SETS = 2
 
 
-def bench_impl(fn, args, position_sets, warmup, iters, bw_ref_gbps):
-    thunk = make_thunk(fn, args, position_sets)
+def bench_impl(runner, args, position_sets, warmup, iters, bw_ref_gbps):
+    thunk = runner.make_thunk(args, position_sets)
     stats = summarize_device_samples(time_device_events(thunk, warmup, iters))
     amortized = time_amortized_call(thunk, warmup, iters)
     synchronized = time_synchronized_call(thunk, warmup, max(10, iters // 5))
@@ -64,36 +63,35 @@ def _blank_metrics():
         "pct_of_empirical_bw")}
 
 
-def run_config(cfg, device, args_ns, bw_ref_gbps):
+def run_config(cfg, device, args_ns, bw_ref_gbps, specs):
     """Validate every impl against the oracle, then time only the impls that passed."""
     rows = []
     seed = args_ns.seed
     position_sets = build_position_sets(cfg, seed, device)
 
-    impls = [("eager", eager_impl())]
-    compile_error = None
-    try:
-        impls.append(("compile", compile_impl(mode=args_ns.compile_mode,
-                                              backend=args_ns.compile_backend)))
-    except Exception as e:  # noqa: BLE001
-        compile_error = f"{type(e).__name__}: {e}"
-
-    if compile_error:
-        rows.append({"impl": "compile", **cfg.as_row(), "seed": seed,
-                     "validation": "ERROR", "validation_detail": compile_error,
-                     **_blank_metrics()})
-
-    for label, fn in impls:
-        report = validate_candidate(fn, cfg, device, seed)
-        base = {"impl": label, **cfg.as_row(), "seed": seed}
+    for spec in specs:
+        base = {"impl": spec.label, **cfg.as_row(), "seed": seed}
+        runner = None
+        try:
+            runner = spec.build(args_ns.compile_mode, args_ns.compile_backend)
+            report = validate_candidate(runner, cfg, device, seed)
+        except Exception as e:  # noqa: BLE001 -- a build or capture failure is a result, not a crash
+            print(f"  ERROR  {spec.label:14s} {cfg.label()}: {type(e).__name__}: {e}",
+                  flush=True)
+            rows.append({**base, "validation": "ERROR",
+                         "validation_detail": f"{type(e).__name__}: {e}",
+                         **_blank_metrics()})
+            _release(runner)
+            continue
         if not report["ok"]:
             detail = "; ".join(report["failures"])
-            print(f"  VALIDATION FAILED  {label:8s} {cfg.label()}: {detail}", flush=True)
+            print(f"  VALIDATION FAILED  {spec.label:14s} {cfg.label()}: {detail}", flush=True)
             rows.append({**base, "validation": "FAIL", "validation_detail": detail,
                          **_blank_metrics()})
+            _release(runner)
             continue
         op_args = build_op_args(cfg, device, seed, position_sets[0])
-        timed = bench_impl(fn, op_args, position_sets, args_ns.warmup,
+        timed = bench_impl(runner, op_args, position_sets, args_ns.warmup,
                            args_ns.iters, bw_ref_gbps)
         del op_args
         rows.append({**base, "validation": "pass",
@@ -101,7 +99,15 @@ def run_config(cfg, device, args_ns, bw_ref_gbps):
                                            f"k_maxdiff={report['max_abs_diff_k_cache']:.2e} "
                                            f"cases={report['num_cases']}"),
                      **timed})
+        _release(runner)
     return rows
+
+
+def _release(runner):
+    """A captured graph pins its private memory pool until the runner is collected."""
+    del runner
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 def main():
@@ -112,6 +118,8 @@ def main():
     ap.add_argument("--iters", type=int, default=100)
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--position-mode", choices=["uniform", "ragged", "both"], default="both")
+    ap.add_argument("--impls", nargs="+", default=list(DEFAULT_IMPLS),
+                    help=f"subset of {list(IMPL_LABELS)}")
     ap.add_argument("--compile-backend", default="inductor")
     ap.add_argument("--compile-mode", default=None)
     ap.add_argument("--device-index", type=int, default=0)
@@ -125,6 +133,11 @@ def main():
         raise SystemExit("CUDA device required for benchmarking")
     torch.cuda.set_device(args.device_index)
     device = f"cuda:{args.device_index}"
+
+    try:
+        specs = resolve_impls(args.impls)
+    except ValueError as e:
+        raise SystemExit(str(e))
 
     modes = (pos.UNIFORM, pos.RAGGED) if args.position_mode == "both" else (args.position_mode,)
 
@@ -141,6 +154,7 @@ def main():
         "iters": args.iters,
         "seed": args.seed,
         "position_modes": list(modes),
+        "impls": [s.label for s in specs],
         "compile_backend": args.compile_backend,
         "compile_mode": args.compile_mode,
         "footprint_budget_gb": args.footprint_budget_gb,
@@ -168,12 +182,12 @@ def main():
                              "validation_detail": f"peak cache {peak_gb:.1f}GB > budget",
                              **_blank_metrics()})
             continue
-        for r in run_config(cfg, device, args, bw_ref_gbps):
+        for r in run_config(cfg, device, args, bw_ref_gbps, specs):
             all_rows.append(r)
             if r["validation"] in ("FAIL", "ERROR"):
                 n_fail += 1
             elif r["device_median_ms"] != "":
-                print(f"{r['impl']:8s} {cfg.label():34s} "
+                print(f"{r['impl']:14s} {cfg.label():34s} "
                       f"dev_median={r['device_median_ms']:.4f}ms "
                       f"p95={r['device_p95_ms']:.4f}ms "
                       f"amort={r['amortized_call_ms']:.4f}ms "

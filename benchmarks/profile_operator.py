@@ -10,14 +10,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from benchmarks import positions as pos
 from benchmarks.benchmark_utils import REPO_ROOT, env_metadata, sync, write_json
+from benchmarks.impls import IMPL_LABELS, resolve_impls
 from benchmarks.validation import validate_candidate
 from benchmarks.workload import (
     Config,
     build_op_args,
     build_position_sets,
-    compile_impl,
-    eager_impl,
-    make_thunk,
 )
 
 PROFILE_DIR = os.path.join(REPO_ROOT, "results/profiling")
@@ -78,17 +76,18 @@ def _op_table(prof, top=8):
     return rows[:top]
 
 
-def profile_one(cfg, impl_label, device, seed, warmup, iters, outdir,
+def profile_one(cfg, spec, device, seed, warmup, iters, outdir,
                 compile_backend="inductor", compile_mode=None):
-    fn = eager_impl() if impl_label == "eager" else compile_impl(compile_mode, compile_backend)
-    report = validate_candidate(fn, cfg, device, seed)
+    impl_label = spec.label
+    runner = spec.build(compile_mode, compile_backend)
+    report = validate_candidate(runner, cfg, device, seed)
     if not report["ok"]:
         raise SystemExit(f"refusing to profile unvalidated config {cfg.label()} "
                          f"[{impl_label}]: {'; '.join(report['failures'])}")
 
     position_sets = build_position_sets(cfg, seed, device)
     args = build_op_args(cfg, device, seed, position_sets[0])
-    thunk = make_thunk(fn, args, position_sets)
+    thunk = runner.make_thunk(args, position_sets)
 
     for _ in range(warmup):
         thunk()
@@ -122,7 +121,8 @@ def main():
     ap.add_argument("--outdir", default=PROFILE_DIR)
     ap.add_argument("--compile-backend", default="inductor")
     ap.add_argument("--compile-mode", default=None)
-    ap.add_argument("--impls", nargs="+", default=["eager", "compile"])
+    ap.add_argument("--impls", nargs="+", default=["eager", "compile"],
+                    help=f"subset of {list(IMPL_LABELS)}")
     ap.add_argument("--single", metavar="HEAD_LABEL",
                     help="profile one config only (for wrapping under nsys): mha|gqa")
     ap.add_argument("--single-batch", type=int, default=32)
@@ -134,6 +134,11 @@ def main():
         raise SystemExit("CUDA device required")
     device = "cuda"
 
+    try:
+        specs = resolve_impls(args.impls)
+    except ValueError as e:
+        raise SystemExit(str(e))
+
     if args.single:
         cfgs = [c for c in REPRESENTATIVE
                 if c.head_label == args.single and c.num_requests == args.single_batch]
@@ -144,27 +149,27 @@ def main():
 
     if args.no_trace:
         for cfg in cfgs:
-            for impl in args.impls:
-                fn = (eager_impl() if impl == "eager"
-                      else compile_impl(args.compile_mode, args.compile_backend))
+            for spec in specs:
+                runner = spec.build(args.compile_mode, args.compile_backend)
                 position_sets = build_position_sets(cfg, args.seed, device)
                 op_args = build_op_args(cfg, device, args.seed, position_sets[0])
-                thunk = make_thunk(fn, op_args, position_sets)
+                thunk = runner.make_thunk(op_args, position_sets)
                 for _ in range(args.warmup):
                     thunk()
                 sync()
-                torch.cuda.nvtx.range_push(f"{impl}:{cfg.label()}")
+                torch.cuda.nvtx.range_push(f"{spec.label}:{cfg.label()}")
                 for _ in range(args.iters):
                     thunk()
                 sync()
                 torch.cuda.nvtx.range_pop()
-                print(f"ran {impl} {cfg.label()} x{args.iters}")
+                print(f"ran {spec.label} {cfg.label()} x{args.iters}")
         return
 
     summaries = []
     for cfg in cfgs:
-        for impl in args.impls:
-            s = profile_one(cfg, impl, device, args.seed, args.warmup, args.iters,
+        for spec in specs:
+            impl = spec.label
+            s = profile_one(cfg, spec, device, args.seed, args.warmup, args.iters,
                             args.outdir, args.compile_backend, args.compile_mode)
             summaries.append(s)
             print(f"{impl:8s} {cfg.label():34s} "
