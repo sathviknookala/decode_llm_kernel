@@ -39,10 +39,14 @@ def test_thunk_construction_is_inside_the_inference_region():
 
 
 def test_timed_row_carries_metrics_and_byte_accounting():
-    row = _timed(DirectRunner(lambda *a: None))
+    position_sets = build_position_sets(CFG, SEED, "cuda", num_sets=2)
+    args = build_op_args(CFG, "cuda", SEED, position_sets[0])
+    row = bench_impl(DirectRunner(lambda *a: None), args, position_sets, 2, 5,
+                     553.0, 200.0)
     assert row["device_median_ms"] >= 0
     assert row["logical_total_bytes"] > 0
     assert row["pct_of_empirical_bw"] != ""
+    assert row["pct_of_scattered_write_bw"] != ""
 
 
 def test_capture_failure_becomes_an_error_row():

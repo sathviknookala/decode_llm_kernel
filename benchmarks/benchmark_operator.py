@@ -39,7 +39,8 @@ DEFAULT_FOOTPRINT_BUDGET_GB = 12.0
 PEAK_CACHE_SETS = 2
 
 
-def bench_impl(runner, args, position_sets, warmup, iters, bw_ref_gbps):
+def bench_impl(runner, args, position_sets, warmup, iters, bw_ref_gbps,
+               scattered_ref_gbps=None):
     # Decode serving runs under inference mode; leaving autograd on would charge every impl
     # for version-counter bookkeeping on the in-place cache write.
     with torch.inference_mode():
@@ -58,6 +59,8 @@ def bench_impl(runner, args, position_sets, warmup, iters, bw_ref_gbps):
     row["logical_total_bytes"] = lb["total_bytes"]
     row["logical_eff_gbps"] = gbps
     row["pct_of_empirical_bw"] = (100.0 * gbps / bw_ref_gbps) if bw_ref_gbps else ""
+    row["pct_of_scattered_write_bw"] = (
+        100.0 * gbps / scattered_ref_gbps if scattered_ref_gbps else "")
     return row
 
 
@@ -66,7 +69,7 @@ def _blank_metrics():
         "device_median_ms", "device_p95_ms", "device_min_ms", "device_std_ms",
         "amortized_call_ms", "synchronized_call_ms", "logical_read_bytes",
         "logical_write_bytes", "logical_total_bytes", "logical_eff_gbps",
-        "pct_of_empirical_bw")}
+        "pct_of_empirical_bw", "pct_of_scattered_write_bw")}
 
 
 def graph_savings(rows):
@@ -94,7 +97,7 @@ def graph_savings(rows):
     return savings
 
 
-def run_config(cfg, device, args_ns, bw_ref_gbps, specs):
+def run_config(cfg, device, args_ns, bw_ref_gbps, specs, scattered_ref_gbps=None):
     """Validate every impl against the oracle, then time only the impls that passed."""
     rows = []
     seed = args_ns.seed
@@ -123,7 +126,7 @@ def run_config(cfg, device, args_ns, bw_ref_gbps, specs):
             continue
         op_args = build_op_args(cfg, device, seed, position_sets[0])
         timed = bench_impl(runner, op_args, position_sets, args_ns.warmup,
-                           args_ns.iters, bw_ref_gbps)
+                           args_ns.iters, bw_ref_gbps, scattered_ref_gbps)
         del op_args
         rows.append({**base, "validation": "pass",
                      "validation_detail": (f"q_maxdiff={report['max_abs_diff_q']:.2e} "
@@ -158,11 +161,19 @@ def _run_benchmark(args, device, specs, modes, clock_status):
 
     bw_ref = None
     bw_ref_gbps = None
+    scattered_ref_gbps = None
     if not args.skip_bandwidth_ref:
         bw_ref = measure_bandwidth_reference(device, args.bandwidth_buffer_mib)
         bw_ref_gbps = bw_ref["reference_gbps"]
+        scattered_ref_gbps = bw_ref["scattered_write_reference_gbps"]
         print(f"# empirical bandwidth reference: {bw_ref_gbps:.1f} GB/s "
               f"({bw_ref['copy']['byte_convention']})")
+        if scattered_ref_gbps:
+            print(f"# scattered-write reference: {scattered_ref_gbps:.1f} GB/s "
+                  f"({bw_ref['scattered_write']['byte_convention']})")
+        else:
+            print(f"WARNING: scattered-write reference unavailable: "
+                  f"{bw_ref['scattered_write']['error']}", file=sys.stderr)
     meta["bandwidth_reference"] = bw_ref
 
     print(f"# {meta['gpu_name']} cc{meta['gpu_compute_capability']} | "
@@ -187,7 +198,7 @@ def _run_benchmark(args, device, specs, modes, clock_status):
                              "validation_detail": f"peak cache {peak_gb:.1f}GB > budget",
                              **_blank_metrics()})
             continue
-        for r in run_config(cfg, device, args, bw_ref_gbps, specs):
+        for r in run_config(cfg, device, args, bw_ref_gbps, specs, scattered_ref_gbps):
             all_rows.append(r)
             if r["validation"] in ("FAIL", "ERROR"):
                 n_fail += 1

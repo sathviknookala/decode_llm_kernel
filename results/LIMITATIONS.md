@@ -18,6 +18,12 @@ overhead on scattered writes, and counts bytes that may be served from L2. The d
 streaming throughput on a different access pattern. Treat the ratio as orientation, not an
 efficiency score. **Blocker:** measured traffic needs Nsight Compute counters, not yet run.
 
+**v2 has only the streaming denominator.** The current rig additionally emits
+`pct_of_scattered_write_bw`, based on random K/V writes into an MHA b=128, alloc=2048, FP32 cache.
+That fixes the access-pattern mismatch but not the byte-mix mismatch: the operator numerator counts
+all logical traffic, while the scattered reference counts K/V source reads and K/V cache writes.
+Neither column is an efficiency score, and the scattered ratio can exceed 100%.
+
 **The timed region is an operator call, not a bare kernel.** It includes PyTorch dispatch and
 one iterator step for position rotation. That is identical across implementations, so
 comparisons are fair, but these are not pure kernel times.
@@ -73,14 +79,18 @@ request and never scans the context.
 
 ## `raw/bandwidth_reference.json`
 
-**It is a streaming reference, not a bound on this operator.** Large contiguous `copy_` and
-`add_` are the friendliest possible access pattern; the operator does small scattered writes
-into a large cache, so it should not be expected to reach this number even when perfectly
-implemented.
+**The continuity reference is streaming, not a bound on this operator.** Large contiguous `copy_`
+and `add_` remain the friendliest pattern. `reference_gbps` is deliberately still the 512 MiB copy
+median so old and new result files stay comparable.
 
-**Single buffer size, single dtype.** 512 MiB FP32. No sweep over sizes to show the L2→DRAM
-transition, so "DRAM-bound" rests on 512 MiB being 10× the 48 MiB L2 rather than on a measured
-knee.
+**The size sweep locates the knee, but only for FP32 copies.** The 1/4/16/64/256/512 MiB sweep
+measures cache-resident throughput through 16 MiB and DRAM throughput from 64 MiB upward on this
+48 MiB-L2 GPU. It does not generalize the knee or throughput to other dtypes or GPUs.
+
+**The scattered reference matches one important shape, not every row.** It uses random K/V slot
+writes at MHA b=128, alloc=2048, FP32 granularity with one 8 GiB K+V cache set. That is the shape
+behind the old 88%-of-streaming headline and stays under the 12 GB budget, but batch size, head
+layout, dtype, and allocation length differ for other operator rows.
 
 **Medians of a short run** (50 iterations after warmup) with no clock-state provenance or control.
 The current rig records boundary state and can request a lock, but this historical file predates
