@@ -152,7 +152,9 @@ def validation_cases(cfg, device, seed):
 def validate_candidate(candidate, cfg, device, seed):
     """Aggregate validation over every case. Returns a report; never raises."""
     cases = validation_cases(cfg, device, seed)
-    reports = [validate_once(candidate, cfg, device, seed, c) for c in cases]
+    # Same autograd state as the timed path, so the gate clears the code that gets measured.
+    with torch.inference_mode():
+        reports = [validate_once(candidate, cfg, device, seed, c) for c in cases]
     failures = [f for r in reports for f in r["failures"]]
     return {
         "ok": not failures,

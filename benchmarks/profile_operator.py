@@ -87,20 +87,20 @@ def profile_one(cfg, spec, device, seed, warmup, iters, outdir,
 
     position_sets = build_position_sets(cfg, seed, device)
     args = build_op_args(cfg, device, seed, position_sets[0])
-    thunk = runner.make_thunk(args, position_sets)
-
-    for _ in range(warmup):
-        thunk()
-    sync()
 
     name = f"{impl_label}_{cfg.label()}"
     trace_path = os.path.join(outdir, f"trace_{name}.json")
     os.makedirs(outdir, exist_ok=True)
-    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-                 record_shapes=False, with_stack=False, acc_events=True) as prof:
-        for _ in range(iters):
+    with torch.inference_mode():                      # match the timing path's autograd state
+        thunk = runner.make_thunk(args, position_sets)
+        for _ in range(warmup):
             thunk()
         sync()
+        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                     record_shapes=False, with_stack=False, acc_events=True) as prof:
+            for _ in range(iters):
+                thunk()
+            sync()
     prof.export_chrome_trace(trace_path)
 
     summary = summarize_trace(trace_path, iters)
@@ -153,15 +153,16 @@ def main():
                 runner = spec.build(args.compile_mode, args.compile_backend)
                 position_sets = build_position_sets(cfg, args.seed, device)
                 op_args = build_op_args(cfg, device, args.seed, position_sets[0])
-                thunk = runner.make_thunk(op_args, position_sets)
-                for _ in range(args.warmup):
-                    thunk()
-                sync()
-                torch.cuda.nvtx.range_push(f"{spec.label}:{cfg.label()}")
-                for _ in range(args.iters):
-                    thunk()
-                sync()
-                torch.cuda.nvtx.range_pop()
+                with torch.inference_mode():
+                    thunk = runner.make_thunk(op_args, position_sets)
+                    for _ in range(args.warmup):
+                        thunk()
+                    sync()
+                    torch.cuda.nvtx.range_push(f"{spec.label}:{cfg.label()}")
+                    for _ in range(args.iters):
+                        thunk()
+                    sync()
+                    torch.cuda.nvtx.range_pop()
                 print(f"ran {spec.label} {cfg.label()} x{args.iters}")
         return
 

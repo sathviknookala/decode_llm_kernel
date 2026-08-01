@@ -13,7 +13,7 @@ from benchmarks.validation import (
 )
 from benchmarks.impls import eager_impl
 from benchmarks.workload import IDENTITY, PACKED, Config
-from decode_kernels.reference import apply_rope
+from decode_kernels.reference import apply_rope, fused_rope_kv_append_ref
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
@@ -202,3 +202,15 @@ def test_validate_or_raise_raises_on_failure():
 def test_validate_or_raise_returns_report_on_success():
     report = validate_or_raise(eager_impl(), MHA_BF16, DEVICE, SEED)
     assert report["ok"]
+
+
+def test_candidate_is_validated_under_inference_mode():
+    seen = []
+
+    def recording(*op_args):
+        seen.append(torch.is_inference_mode_enabled())
+        return fused_rope_kv_append_ref(*op_args)
+
+    report = validate_candidate(recording, MHA_BF16, DEVICE, SEED)
+    assert report["ok"]
+    assert seen and all(seen)

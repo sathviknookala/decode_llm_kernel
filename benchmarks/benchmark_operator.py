@@ -37,10 +37,13 @@ PEAK_CACHE_SETS = 2
 
 
 def bench_impl(runner, args, position_sets, warmup, iters, bw_ref_gbps):
-    thunk = runner.make_thunk(args, position_sets)
-    stats = summarize_device_samples(time_device_events(thunk, warmup, iters))
-    amortized = time_amortized_call(thunk, warmup, iters)
-    synchronized = time_synchronized_call(thunk, warmup, max(10, iters // 5))
+    # Decode serving runs under inference mode; leaving autograd on would charge every impl
+    # for version-counter bookkeeping on the in-place cache write.
+    with torch.inference_mode():
+        thunk = runner.make_thunk(args, position_sets)
+        stats = summarize_device_samples(time_device_events(thunk, warmup, iters))
+        amortized = time_amortized_call(thunk, warmup, iters)
+        synchronized = time_synchronized_call(thunk, warmup, max(10, iters // 5))
     lb = logical_bytes(args.q, args.k, args.v, args.cos, args.sin,
                        args.k_cache, args.v_cache)
     gbps = logical_eff_gbps(lb["total_bytes"], stats["device_median_ms"])
