@@ -19,6 +19,7 @@ build/
 # Transient benchmark logs / smoke-run CSVs (keep canonical result CSVs)
 results/raw/*.log
 results/raw/*_quick.csv
+results/raw/*_quick.env.json
 
 # Nsight binaries: large, regenerable via benchmarks/nsight_capture.sh.
 # The *_cuda_gpu_kern_sum.csv summaries it emits ARE tracked.
