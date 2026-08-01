@@ -10,6 +10,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from benchmarks.benchmark_utils import (
     REPO_ROOT,
     env_metadata,
+    gpu_clock_lock,
+    record_gpu_state_end,
     time_device_events,
     write_json,
 )
@@ -89,14 +91,23 @@ def main():
     ap.add_argument("--buffer-mib", type=int, default=DEFAULT_BUFFER_MIB)
     ap.add_argument("--warmup", type=int, default=10)
     ap.add_argument("--iters", type=int, default=50)
+    ap.add_argument("--device-index", type=int, default=0)
+    ap.add_argument("--lock-clocks", action="store_true",
+                    help="attempt to lock the selected GPU at its maximum SM clock")
     ap.add_argument("--out", default=os.path.join(REPO_ROOT, "results/raw/bandwidth_reference.json"))
     args = ap.parse_args()
     if not torch.cuda.is_available():
         raise SystemExit("CUDA device required")
 
-    ref = measure_bandwidth_reference("cuda", args.buffer_mib, args.warmup, args.iters)
-    payload = {"environment": env_metadata(0, cli_args=vars(args)), "bandwidth_reference": ref}
-    write_json(args.out, payload)
+    torch.cuda.set_device(args.device_index)
+    device = f"cuda:{args.device_index}"
+    with gpu_clock_lock(args.device_index, args.lock_clocks) as clock_status:
+        meta = env_metadata(args.device_index, cli_args=vars(args),
+                            extra={"clock_lock": clock_status})
+        ref = measure_bandwidth_reference(device, args.buffer_mib, args.warmup, args.iters)
+        record_gpu_state_end(meta, args.device_index)
+        payload = {"environment": meta, "bandwidth_reference": ref}
+        write_json(args.out, payload)
 
     print(f"buffer            : {ref['buffer_mib']} MiB   (L2 = {ref['l2_cache_bytes']} bytes)")
     for key in ("copy", "triad"):

@@ -9,7 +9,14 @@ from torch.profiler import ProfilerActivity, profile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from benchmarks import positions as pos
-from benchmarks.benchmark_utils import REPO_ROOT, env_metadata, sync, write_json
+from benchmarks.benchmark_utils import (
+    REPO_ROOT,
+    env_metadata,
+    gpu_clock_lock,
+    record_gpu_state_end,
+    sync,
+    write_json,
+)
 from benchmarks.impls import IMPL_LABELS, resolve_impls
 from benchmarks.validation import validate_candidate
 from benchmarks.workload import (
@@ -113,40 +120,7 @@ def profile_one(cfg, spec, device, seed, warmup, iters, outdir,
     return summary
 
 
-def main():
-    ap = argparse.ArgumentParser(description="Profiler evidence for eager vs compiled operator")
-    ap.add_argument("--iters", type=int, default=20)
-    ap.add_argument("--warmup", type=int, default=25)
-    ap.add_argument("--seed", type=int, default=1234)
-    ap.add_argument("--outdir", default=PROFILE_DIR)
-    ap.add_argument("--compile-backend", default="inductor")
-    ap.add_argument("--compile-mode", default=None)
-    ap.add_argument("--impls", nargs="+", default=["eager", "compile"],
-                    help=f"subset of {list(IMPL_LABELS)}")
-    ap.add_argument("--single", metavar="HEAD_LABEL",
-                    help="profile one config only (for wrapping under nsys): mha|gqa")
-    ap.add_argument("--single-batch", type=int, default=32)
-    ap.add_argument("--no-trace", action="store_true",
-                    help="run the workload without the PyTorch profiler (nsys wraps it instead)")
-    args = ap.parse_args()
-
-    if not torch.cuda.is_available():
-        raise SystemExit("CUDA device required")
-    device = "cuda"
-
-    try:
-        specs = resolve_impls(args.impls)
-    except ValueError as e:
-        raise SystemExit(str(e))
-
-    if args.single:
-        cfgs = [c for c in REPRESENTATIVE
-                if c.head_label == args.single and c.num_requests == args.single_batch]
-        if not cfgs:
-            raise SystemExit(f"no representative config for {args.single} b={args.single_batch}")
-    else:
-        cfgs = REPRESENTATIVE
-
+def _run_profiles(args, cfgs, specs, device, clock_status):
     if args.no_trace:
         for cfg in cfgs:
             for spec in specs:
@@ -166,6 +140,8 @@ def main():
                 print(f"ran {spec.label} {cfg.label()} x{args.iters}")
         return
 
+    meta = env_metadata(args.device_index, cli_args=vars(args),
+                        extra={"clock_lock": clock_status})
     summaries = []
     for cfg in cfgs:
         for spec in specs:
@@ -179,14 +155,56 @@ def main():
                   f"device_us/invocation={s['device_time_per_invocation_us']:.1f}")
 
     out = os.path.join(args.outdir, "profile_summary.json")
-    write_json(out, {"environment": env_metadata(0, cli_args=vars(args)),
-                     "summaries": summaries})
+    record_gpu_state_end(meta, args.device_index)
+    write_json(out, {"environment": meta, "summaries": summaries})
 
     print("\nlaunch structure (kernels per invocation):")
     for s in summaries:
         print(f"  {s['impl']:8s} {s['config']:34s} {s['kernels_per_invocation']:.2f}")
     print(f"\nwrote {out}")
     print(f"traces in {args.outdir}/trace_*.json (open in chrome://tracing or perfetto.dev)")
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Profiler evidence for eager vs compiled operator")
+    ap.add_argument("--iters", type=int, default=20)
+    ap.add_argument("--warmup", type=int, default=25)
+    ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument("--outdir", default=PROFILE_DIR)
+    ap.add_argument("--compile-backend", default="inductor")
+    ap.add_argument("--compile-mode", default=None)
+    ap.add_argument("--device-index", type=int, default=0)
+    ap.add_argument("--lock-clocks", action="store_true",
+                    help="attempt to lock the selected GPU at its maximum SM clock")
+    ap.add_argument("--impls", nargs="+", default=["eager", "compile"],
+                    help=f"subset of {list(IMPL_LABELS)}")
+    ap.add_argument("--single", metavar="HEAD_LABEL",
+                    help="profile one config only (for wrapping under nsys): mha|gqa")
+    ap.add_argument("--single-batch", type=int, default=32)
+    ap.add_argument("--no-trace", action="store_true",
+                    help="run the workload without the PyTorch profiler (nsys wraps it instead)")
+    args = ap.parse_args()
+
+    if not torch.cuda.is_available():
+        raise SystemExit("CUDA device required")
+    torch.cuda.set_device(args.device_index)
+    device = f"cuda:{args.device_index}"
+
+    try:
+        specs = resolve_impls(args.impls)
+    except ValueError as e:
+        raise SystemExit(str(e))
+
+    if args.single:
+        cfgs = [c for c in REPRESENTATIVE
+                if c.head_label == args.single and c.num_requests == args.single_batch]
+        if not cfgs:
+            raise SystemExit(f"no representative config for {args.single} b={args.single_batch}")
+    else:
+        cfgs = REPRESENTATIVE
+
+    with gpu_clock_lock(args.device_index, args.lock_clocks) as clock_status:
+        _run_profiles(args, cfgs, specs, device, clock_status)
 
 
 if __name__ == "__main__":

@@ -13,8 +13,10 @@ from benchmarks.benchmark_utils import (
     REPO_ROOT,
     cache_footprint_bytes,
     env_metadata,
+    gpu_clock_lock,
     logical_bytes,
     logical_eff_gbps,
+    record_gpu_state_end,
     summarize_device_samples,
     time_amortized_call,
     time_device_events,
@@ -141,45 +143,7 @@ def _release(runner):
     torch.cuda.empty_cache()
 
 
-def main():
-    ap = argparse.ArgumentParser(
-        description="Operator benchmark: eager vs torch.compile fused RoPE + KV-append")
-    ap.add_argument("--quick", action="store_true", help="reduced matrix for a smoke run")
-    ap.add_argument("--warmup", type=int, default=25)
-    ap.add_argument("--iters", type=int, default=100)
-    ap.add_argument("--seed", type=int, default=1234)
-    ap.add_argument("--position-mode", choices=["uniform", "ragged", "both"], default="both")
-    ap.add_argument("--impls", nargs="+", default=list(DEFAULT_IMPLS),
-                    help=f"subset of {list(IMPL_LABELS)}")
-    ap.add_argument("--compile-backend", default="inductor")
-    ap.add_argument("--compile-mode", default=None)
-    ap.add_argument("--device-index", type=int, default=0)
-    ap.add_argument("--footprint-budget-gb", type=float, default=DEFAULT_FOOTPRINT_BUDGET_GB)
-    ap.add_argument("--bandwidth-buffer-mib", type=int, default=512)
-    ap.add_argument("--skip-bandwidth-ref", action="store_true")
-    ap.add_argument("--out", default=os.path.join(REPO_ROOT, "results/raw/operator_baseline_v2.csv"))
-    args = ap.parse_args()
-
-    if not torch.cuda.is_available():
-        raise SystemExit("CUDA device required for benchmarking")
-    torch.cuda.set_device(args.device_index)
-    device = f"cuda:{args.device_index}"
-
-    try:
-        specs = resolve_impls(args.impls)
-    except ValueError as e:
-        raise SystemExit(str(e))
-
-    modes = (pos.UNIFORM, pos.RAGGED) if args.position_mode == "both" else (args.position_mode,)
-
-    bw_ref = None
-    bw_ref_gbps = None
-    if not args.skip_bandwidth_ref:
-        bw_ref = measure_bandwidth_reference(device, args.bandwidth_buffer_mib)
-        bw_ref_gbps = bw_ref["reference_gbps"]
-        print(f"# empirical bandwidth reference: {bw_ref_gbps:.1f} GB/s "
-              f"({bw_ref['copy']['byte_convention']})")
-
+def _run_benchmark(args, device, specs, modes, clock_status):
     meta = env_metadata(args.device_index, cli_args=vars(args), extra={
         "warmup": args.warmup,
         "iters": args.iters,
@@ -189,8 +153,18 @@ def main():
         "compile_backend": args.compile_backend,
         "compile_mode": args.compile_mode,
         "footprint_budget_gb": args.footprint_budget_gb,
-        "bandwidth_reference": bw_ref,
+        "clock_lock": clock_status,
     })
+
+    bw_ref = None
+    bw_ref_gbps = None
+    if not args.skip_bandwidth_ref:
+        bw_ref = measure_bandwidth_reference(device, args.bandwidth_buffer_mib)
+        bw_ref_gbps = bw_ref["reference_gbps"]
+        print(f"# empirical bandwidth reference: {bw_ref_gbps:.1f} GB/s "
+              f"({bw_ref['copy']['byte_convention']})")
+    meta["bandwidth_reference"] = bw_ref
+
     print(f"# {meta['gpu_name']} cc{meta['gpu_compute_capability']} | "
           f"torch {meta['torch_version']} | driver {meta['nvidia_driver_version']} | "
           f"nvcc {meta['cuda_toolkit_version_nvcc']} | git {meta['git_sha']}"
@@ -229,6 +203,7 @@ def main():
     meta_path = os.path.splitext(args.out)[0] + ".env.json"
     n_timed = sum(1 for r in all_rows if r["validation"] == "pass")
     savings = graph_savings(all_rows)
+    record_gpu_state_end(meta, args.device_index)
     write_json(meta_path, {"environment": meta, "summary": {
         "rows_total": len(all_rows), "rows_timed": n_timed,
         "validation_failures": n_fail, "configs_skipped": n_skip,
@@ -248,6 +223,42 @@ def main():
         print(f"\nFAILED: {n_fail} configuration(s) did not validate; their timings were "
               f"not recorded.", file=sys.stderr)
         raise SystemExit(1)
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Operator benchmark: eager vs torch.compile fused RoPE + KV-append")
+    ap.add_argument("--quick", action="store_true", help="reduced matrix for a smoke run")
+    ap.add_argument("--warmup", type=int, default=25)
+    ap.add_argument("--iters", type=int, default=100)
+    ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument("--position-mode", choices=["uniform", "ragged", "both"], default="both")
+    ap.add_argument("--impls", nargs="+", default=list(DEFAULT_IMPLS),
+                    help=f"subset of {list(IMPL_LABELS)}")
+    ap.add_argument("--compile-backend", default="inductor")
+    ap.add_argument("--compile-mode", default=None)
+    ap.add_argument("--device-index", type=int, default=0)
+    ap.add_argument("--lock-clocks", action="store_true",
+                    help="attempt to lock the selected GPU at its maximum SM clock")
+    ap.add_argument("--footprint-budget-gb", type=float, default=DEFAULT_FOOTPRINT_BUDGET_GB)
+    ap.add_argument("--bandwidth-buffer-mib", type=int, default=512)
+    ap.add_argument("--skip-bandwidth-ref", action="store_true")
+    ap.add_argument("--out", default=os.path.join(REPO_ROOT, "results/raw/operator_baseline_v2.csv"))
+    args = ap.parse_args()
+
+    if not torch.cuda.is_available():
+        raise SystemExit("CUDA device required for benchmarking")
+    torch.cuda.set_device(args.device_index)
+    device = f"cuda:{args.device_index}"
+
+    try:
+        specs = resolve_impls(args.impls)
+    except ValueError as e:
+        raise SystemExit(str(e))
+
+    modes = (pos.UNIFORM, pos.RAGGED) if args.position_mode == "both" else (args.position_mode,)
+    with gpu_clock_lock(args.device_index, args.lock_clocks) as clock_status:
+        _run_benchmark(args, device, specs, modes, clock_status)
 
 
 if __name__ == "__main__":

@@ -7,11 +7,19 @@ import statistics
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 import torch
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+GPU_STATE_FIELDS = (
+    "clocks.sm",
+    "clocks.mem",
+    "temperature.gpu",
+    "power.draw",
+    "clocks_throttle_reasons.active",
+)
 
 
 def sync():
@@ -141,6 +149,70 @@ def _capture(args):
         return None
 
 
+def gpu_state_metadata(device_index):
+    query = ",".join(GPU_STATE_FIELDS)
+    out = _capture([
+        "nvidia-smi", f"--query-gpu={query}", "--format=csv,noheader,nounits",
+        f"--id={device_index}",
+    ])
+    if not out:
+        return {"error": "nvidia-smi state query failed"}
+    values = [v.strip() for v in out.splitlines()[0].split(",")]
+    if len(values) != len(GPU_STATE_FIELDS):
+        return {"error": "unexpected nvidia-smi state response", "raw": out}
+    return dict(zip(GPU_STATE_FIELDS, values))
+
+
+def record_gpu_state_end(meta, device_index):
+    meta["gpu_state_end"] = gpu_state_metadata(device_index)
+
+
+def _run_nvidia_smi(args):
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=20)
+    except Exception as e:
+        return subprocess.CompletedProcess(args, 1, "", f"{type(e).__name__}: {e}")
+
+
+def _command_error(result):
+    return (result.stderr or result.stdout or f"exit {result.returncode}").strip()
+
+
+@contextmanager
+def gpu_clock_lock(device_index, enabled):
+    status = {"requested": bool(enabled), "locked": False, "target_sm_mhz": None}
+    if enabled:
+        target = _capture([
+            "nvidia-smi", "--query-gpu=clocks.max.sm", "--format=csv,noheader,nounits",
+            f"--id={device_index}",
+        ])
+        if target:
+            target = target.splitlines()[0].strip()
+            result = _run_nvidia_smi([
+                "nvidia-smi", f"--id={device_index}", "-lgc", f"{target},{target}",
+            ])
+            if result.returncode == 0:
+                status.update({"locked": True, "target_sm_mhz": target})
+                print(f"# locked GPU {device_index} SM clock at {target} MHz")
+            else:
+                status["lock_error"] = _command_error(result)
+        else:
+            status["lock_error"] = "could not query clocks.max.sm"
+        if not status["locked"]:
+            print(f"WARNING: --lock-clocks failed for GPU {device_index}: "
+                  f"{status['lock_error']}; continuing unlocked", file=sys.stderr)
+    try:
+        yield status
+    finally:
+        if status["locked"]:
+            result = _run_nvidia_smi(["nvidia-smi", f"--id={device_index}", "-rgc"])
+            if result.returncode == 0:
+                print(f"# restored GPU {device_index} SM clock policy")
+            else:
+                print(f"WARNING: failed to restore GPU {device_index} clocks: "
+                      f"{_command_error(result)}", file=sys.stderr)
+
+
 def _nvcc_version():
     out = _capture(["nvcc", "--version"])
     if not out:
@@ -211,6 +283,7 @@ def env_metadata(device_index=0, *, cli_args=None, extra=None):
         "os_system": platform.system(),
         "kernel_release": platform.release(),
         "cli_args": cli_args,
+        "gpu_state_start": gpu_state_metadata(device_index),
     }
     meta.update(_git_metadata())
     meta.update(_dynamo_inductor_settings())

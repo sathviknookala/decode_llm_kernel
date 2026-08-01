@@ -28,6 +28,12 @@ and `graph_compile` bind every other input pointer at capture and copy each next
 a static buffer before replay. That copy is a real launch inside the timed region, matching the
 dynamic-position serving contract rather than presenting replay alone as the operator cost.
 
+**This file predates start/end clock-state capture.** The rig now records SM and memory clocks,
+temperature, power draw, and active throttle reasons at both boundaries. On this machine the
+opt-in clock lock is unavailable to the current user: `nvidia-smi -lgc` reports that permission to
+change clocks is required, so the rig logs the denial and continues unlocked before restoring only
+locks it actually acquired. Do not retroactively read v2's few-percent deltas as clock-controlled.
+
 **Two configurations are unmeasured, not measured-and-fast.** `mha b=128 alloc=2048 fp32`
 (both position modes) is skipped: it needs 17.2 GB peak contiguous cache (2 sets × 8.6 GB)
 against a 12 GB budget on a 23.4 GiB card. Rows are present with `impl=skipped` and the
@@ -76,8 +82,9 @@ implemented.
 transition, so "DRAM-bound" rests on 512 MiB being 10× the 48 MiB L2 rather than on a measured
 knee.
 
-**Medians of a short run** (50 iterations after warmup) with no clock-state control — no
-locked clocks, no thermal soak — so treat ±few-% differences as noise.
+**Medians of a short run** (50 iterations after warmup) with no clock-state provenance or control.
+The current rig records boundary state and can request a lock, but this historical file predates
+that change; treat its ±few-percent differences as noise.
 
 ---
 
