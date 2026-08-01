@@ -1,8 +1,10 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
 
 from benchmarks import positions as pos
-from benchmarks.benchmark_operator import bench_impl
+from benchmarks.benchmark_operator import bench_impl, graph_savings, run_config
 from benchmarks.impls import DirectRunner
 from benchmarks.workload import Config, build_op_args, build_position_sets
 
@@ -41,3 +43,35 @@ def test_timed_row_carries_metrics_and_byte_accounting():
     assert row["device_median_ms"] >= 0
     assert row["logical_total_bytes"] > 0
     assert row["pct_of_empirical_bw"] != ""
+
+
+def test_capture_failure_becomes_an_error_row():
+    class FailingSpec:
+        label = "graph_broken"
+
+        @staticmethod
+        def build(*_):
+            def fail(*_):
+                raise RuntimeError("capture permission denied")
+            return DirectRunner(fail)
+
+    args = SimpleNamespace(seed=SEED, compile_mode=None, compile_backend="inductor",
+                           warmup=1, iters=1)
+    rows = run_config(CFG, "cuda", args, None, [FailingSpec()])
+    assert rows[0]["validation"] == "ERROR"
+    assert "capture permission denied" in rows[0]["validation_detail"]
+    assert rows[0]["device_median_ms"] == ""
+
+
+def test_graph_savings_pairs_matching_configs_only():
+    cfg = CFG.as_row()
+    other = {**cfg, "num_requests": 32}
+    rows = [
+        {"impl": "compile", **cfg, "validation": "pass", "device_median_ms": 0.04},
+        {"impl": "graph_compile", **cfg, "validation": "pass", "device_median_ms": 0.01},
+        {"impl": "compile", **other, "validation": "pass", "device_median_ms": 0.02},
+    ]
+    got = graph_savings(rows)
+    assert len(got) == 1
+    assert got[0]["latency_removed_pct"] == pytest.approx(75.0)
+    assert got[0]["config"]["num_requests"] == CFG.num_requests

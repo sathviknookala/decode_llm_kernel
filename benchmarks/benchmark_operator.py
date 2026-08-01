@@ -25,6 +25,7 @@ from benchmarks.benchmark_utils import (
 from benchmarks.impls import DEFAULT_IMPLS, IMPL_LABELS, resolve_impls
 from benchmarks.validation import validate_candidate
 from benchmarks.workload import (
+    Config,
     build_matrix,
     build_op_args,
     build_position_sets,
@@ -64,6 +65,31 @@ def _blank_metrics():
         "amortized_call_ms", "synchronized_call_ms", "logical_read_bytes",
         "logical_write_bytes", "logical_total_bytes", "logical_eff_gbps",
         "pct_of_empirical_bw")}
+
+
+def graph_savings(rows):
+    config_keys = tuple(Config.__dataclass_fields__)
+    timed = {(r["impl"], tuple(r.get(k) for k in config_keys)): r for r in rows
+             if r.get("validation") == "pass" and r.get("device_median_ms") != ""}
+    savings = []
+    for (impl, key), direct in timed.items():
+        if impl not in ("eager", "compile"):
+            continue
+        graph_impl = f"graph_{impl}"
+        graph = timed.get((graph_impl, key))
+        if graph is None:
+            continue
+        direct_ms = float(direct["device_median_ms"])
+        graph_ms = float(graph["device_median_ms"])
+        savings.append({
+            "direct_impl": impl,
+            "graph_impl": graph_impl,
+            "config": dict(zip(config_keys, key)),
+            "direct_device_median_ms": direct_ms,
+            "graph_device_median_ms": graph_ms,
+            "latency_removed_pct": 100.0 * (1.0 - graph_ms / direct_ms),
+        })
+    return savings
 
 
 def run_config(cfg, device, args_ns, bw_ref_gbps, specs):
@@ -108,6 +134,8 @@ def run_config(cfg, device, args_ns, bw_ref_gbps, specs):
 
 def _release(runner):
     """A captured graph pins its private memory pool until the runner is collected."""
+    if runner is not None and hasattr(runner, "release"):
+        runner.release()
     del runner
     gc.collect()
     torch.cuda.empty_cache()
@@ -200,11 +228,21 @@ def main():
     write_csv(args.out, all_rows)
     meta_path = os.path.splitext(args.out)[0] + ".env.json"
     n_timed = sum(1 for r in all_rows if r["validation"] == "pass")
+    savings = graph_savings(all_rows)
     write_json(meta_path, {"environment": meta, "summary": {
         "rows_total": len(all_rows), "rows_timed": n_timed,
-        "validation_failures": n_fail, "configs_skipped": n_skip}})
+        "validation_failures": n_fail, "configs_skipped": n_skip,
+        "graph_savings": savings}})
 
     print(f"\ntimed rows: {n_timed} | validation failures: {n_fail} | skipped configs: {n_skip}")
+    if savings:
+        print("CUDA graph device-median latency removed:")
+        for s in savings:
+            cfg = s["config"]
+            print(f"  {s['graph_impl']} vs {s['direct_impl']}: "
+                  f"{s['latency_removed_pct']:.1f}% at {cfg['head_label']} "
+                  f"b={cfg['num_requests']} alloc={cfg['cache_alloc_len']} "
+                  f"{cfg['dtype_label']} {cfg['position_mode']}")
     print(f"wrote {args.out}\nwrote {meta_path}")
     if n_fail:
         print(f"\nFAILED: {n_fail} configuration(s) did not validate; their timings were "

@@ -22,11 +22,11 @@ efficiency score. **Blocker:** measured traffic needs Nsight Compute counters, n
 one iterator step for position rotation. That is identical across implementations, so
 comparisons are fair, but these are not pure kernel times.
 
-**No CUDA-graph baseline.** Since ~93% of the compiled path's measured cost is dispatch
-(`profiling/profile_summary.json`), a graph-captured variant is the missing measurement that
-would cleanly separate launch overhead from kernel cost. Until it exists, "dispatch-bound" is
-supported by the profiler split but the size of the recoverable fraction is unquantified.
-**This is the highest-value gap for Checkpoint C.**
+**This file predates the CUDA-graph baseline now available in the rig.** Its direct-path
+"dispatch share" remains arithmetic, not a graph comparison. In subsequent runs `graph_eager`
+and `graph_compile` bind every other input pointer at capture and copy each next position set into
+a static buffer before replay. That copy is a real launch inside the timed region, matching the
+dynamic-position serving contract rather than presenting replay alone as the operator cost.
 
 **Two configurations are unmeasured, not measured-and-fast.** `mha b=128 alloc=2048 fp32`
 (both position modes) is skipped: it needs 17.2 GB peak contiguous cache (2 sets × 8.6 GB)
@@ -86,8 +86,8 @@ locked clocks, no thermal soak — so treat ±few-% differences as noise.
 **Kernel counts are exact; the attribution of the remaining time is inferred.** The traces
 establish kernels per invocation and device time per invocation directly. That the rest of the
 measured span is host-side dispatch follows from the arithmetic (1.8 µs of GPU work inside a
-25.5 µs call) rather than from a direct measurement of dispatch cost. A CUDA-graph comparison
-would confirm it.
+25.5 µs call). These v2-era traces predate the graph comparison; use the subsequent baseline's
+graph-vs-direct latency for the measured recoverable launch share.
 
 **Profiling perturbs what it measures.** Reported device times come from profiled runs and are
 not the timing path's numbers; use `operator_baseline_v2.csv` for latency.

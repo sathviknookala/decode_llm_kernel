@@ -1,3 +1,4 @@
+import itertools
 from dataclasses import dataclass
 
 import torch
@@ -9,6 +10,7 @@ from benchmarks.workload import make_thunk
 EAGER = "eager"
 COMPILE = "compile"
 BASES = (EAGER, COMPILE)
+GRAPH_WARMUP = 3
 
 
 def eager_impl():
@@ -48,6 +50,80 @@ class DirectRunner:
         return make_thunk(self.fn, args, position_sets)
 
 
+class GraphRunner:
+    def __init__(self, fn, warmup=GRAPH_WARMUP):
+        self.fn = fn
+        self.warmup = warmup
+        self.capture_count = 0
+        self._key = None
+        self._graph = None
+        self._output = None
+        self._static_positions = None
+        self._bound_args = None
+
+    @property
+    def captured(self):
+        return self._graph is not None
+
+    @staticmethod
+    def _pointer_key(op_args):
+        q, k, v, _, cos, sin, k_cache, v_cache, request_indices = op_args
+        return tuple(t.data_ptr() for t in (
+            q, k, v, cos, sin, k_cache, v_cache, request_indices))
+
+    def _capture(self, op_args):
+        self.release()
+        q, k, v, positions, cos, sin, k_cache, v_cache, request_indices = op_args
+        static_positions = torch.empty_like(positions)
+        static_positions.copy_(positions)
+        bound_args = (q, k, v, static_positions, cos, sin,
+                      k_cache, v_cache, request_indices)
+
+        current = torch.cuda.current_stream(q.device)
+        side = torch.cuda.Stream(device=q.device)
+        side.wait_stream(current)
+        with torch.cuda.stream(side):
+            for _ in range(self.warmup):
+                self.fn(*bound_args)
+        current.wait_stream(side)
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = self.fn(*bound_args)
+
+        self._key = self._pointer_key(op_args)
+        self._graph = graph
+        self._output = output
+        self._static_positions = static_positions
+        self._bound_args = bound_args
+        self.capture_count += 1
+
+    def __call__(self, *op_args):
+        key = self._pointer_key(op_args)
+        if key != self._key:
+            self._capture(op_args)
+        self._static_positions.copy_(op_args[3])
+        self._graph.replay()
+        return self._output
+
+    def make_thunk(self, args, position_sets):
+        cyc = itertools.cycle(position_sets)
+        q, k, v = args.q, args.k, args.v
+        cos, sin = args.cos, args.sin
+        kc, vc, ri = args.k_cache, args.v_cache, args.request_indices
+
+        def run():
+            self(q, k, v, next(cyc), cos, sin, kc, vc, ri)
+        return run
+
+    def release(self):
+        self._output = None
+        self._graph = None
+        self._static_positions = None
+        self._bound_args = None
+        self._key = None
+
+
 @dataclass(frozen=True)
 class ImplSpec:
     label: str
@@ -56,12 +132,15 @@ class ImplSpec:
     description: str
 
     def build(self, mode=None, backend="inductor"):
-        return DirectRunner(base_callable(self.base, mode, backend))
+        fn = base_callable(self.base, mode, backend)
+        return GraphRunner(fn) if self.graph else DirectRunner(fn)
 
 
 IMPL_SPECS = (
     ImplSpec("eager", EAGER, False, "reference through eager PyTorch dispatch"),
     ImplSpec("compile", COMPILE, False, "reference through torch.compile"),
+    ImplSpec("graph_eager", EAGER, True, "eager reference replayed through a CUDA graph"),
+    ImplSpec("graph_compile", COMPILE, True, "compiled reference replayed through a CUDA graph"),
 )
 
 IMPL_LABELS = tuple(s.label for s in IMPL_SPECS)

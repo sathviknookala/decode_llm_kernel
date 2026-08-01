@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 import torch
 
@@ -7,8 +9,10 @@ from benchmarks.impls import (
     IMPL_LABELS,
     IMPL_SPECS,
     DirectRunner,
+    GraphRunner,
     resolve_impls,
 )
+from benchmarks.validation import validate_candidate
 from benchmarks.workload import Config, build_op_args, build_position_sets
 
 CFG = Config("mha", 8, 8, 64, 4, 128, "fp32", pos.RAGGED)
@@ -52,3 +56,30 @@ def test_direct_runner_thunk_rotates_positions():
     for _ in range(3):
         thunk()
     assert seen == [p.data_ptr() for p in position_sets]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_graph_runner_reuses_capture_for_new_position_tensors_and_recaptures_inputs():
+    position_sets = build_position_sets(CFG, SEED, "cuda", num_sets=2)
+    args = build_op_args(CFG, "cuda", SEED, position_sets[0])
+    runner = GraphRunner(lambda *a: a[0] + a[3][:, None, None], warmup=1)
+
+    first = runner(*args).clone()
+    second = runner(*args._replace(positions=position_sets[1])).clone()
+    assert runner.capture_count == 1
+    assert not torch.equal(first, second)
+
+    fresh = build_op_args(CFG, "cuda", SEED, position_sets[0])
+    runner(*fresh)
+    assert runner.capture_count == 2
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("impl_label", ["graph_eager", "graph_compile"])
+@pytest.mark.parametrize("position_mode", [pos.UNIFORM, pos.RAGGED])
+def test_graph_impls_pass_the_full_validation_gate(impl_label, position_mode):
+    cfg = replace(CFG, position_mode=position_mode)
+    runner = resolve_impls([impl_label])[0].build()
+    report = validate_candidate(runner, cfg, "cuda", SEED)
+    assert report["ok"], report["failures"]
+    assert {"permuted-requests", "strided-qkv"}.issubset(report["cases"])
