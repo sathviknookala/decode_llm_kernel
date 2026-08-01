@@ -138,12 +138,13 @@ def validation_cases(cfg, device, seed):
     """
     timed = pos.build_position_sets(cfg.num_requests, cfg.cache_alloc_len,
                                     cfg.position_mode, seed, 2, device)
-    cases = [ValidationCase(f"{cfg.position_mode}[{i}]", p, IDENTITY, PACKED)
+    cases = [ValidationCase(f"{cfg.position_mode}[{i}]", p,
+                            cfg.request_mapping, cfg.layout)
              for i, p in enumerate(timed)]
     if cfg.position_mode != pos.UNIFORM:
         uniform = pos.build_position_sets(cfg.num_requests, cfg.cache_alloc_len,
                                           pos.UNIFORM, seed, 1, device)[0]
-        cases.append(ValidationCase("uniform", uniform, IDENTITY, PACKED))
+        cases.append(ValidationCase("uniform", uniform, cfg.request_mapping, cfg.layout))
     cases.append(ValidationCase("permuted-requests", timed[0], PERMUTED, PACKED))
     cases.append(ValidationCase("strided-qkv", timed[0], IDENTITY, STRIDED))
     return cases

@@ -64,8 +64,8 @@ of Mistral-7B-v0.1 the model.
 
 **Timed rows use the identity request mapping and packed Q/K/V.** Non-identity mappings and
 fused-projection strides are exercised by the validation gate, not by the timing path, so this
-file says nothing about their cost. A strided read is plausibly slower than a packed one; that
-delta is unmeasured.
+file says nothing about their cost. The current rig adds explicit columns and an adjacent-control
+supplemental cross at b∈{1,32}; those measurements belong to the subsequent baseline, not v2.
 
 **The attention consumer is not modelled at all.** This operator only writes the cache. A
 layout or kernel that speeds writes may slow the attention reads that follow, and that

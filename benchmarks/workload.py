@@ -24,6 +24,7 @@ LAYOUTS = (PACKED, STRIDED)
 IDENTITY = "identity"
 PERMUTED = "permuted"
 REQUEST_MAPPINGS = (IDENTITY, PERMUTED)
+SERVING_VARIANT_BATCHES = (1, 32)
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,8 @@ class Config:
     cache_alloc_len: int
     dtype_label: str
     position_mode: str
+    layout: str = PACKED
+    request_mapping: str = IDENTITY
 
     @property
     def dtype(self):
@@ -45,8 +48,11 @@ class Config:
         return asdict(self)
 
     def label(self):
-        return (f"{self.head_label}_b{self.num_requests}_alloc{self.cache_alloc_len}"
-                f"_{self.dtype_label}_{self.position_mode}")
+        label = (f"{self.head_label}_b{self.num_requests}_alloc{self.cache_alloc_len}"
+                 f"_{self.dtype_label}_{self.position_mode}")
+        if (self.layout, self.request_mapping) != (PACKED, IDENTITY):
+            label += f"_{self.layout}_{self.request_mapping}"
+        return label
 
 
 class OpArgs(NamedTuple):
@@ -90,10 +96,12 @@ def _build_qkv(t, hq, hkv, d, dt, device, g, layout):
 
 
 def build_op_args(cfg, device, seed, positions, *, sentinel_cache=False,
-                  request_mapping=IDENTITY, layout=PACKED):
+                  request_mapping=None, layout=None):
     """Allocate one invocation's tensors. RoPE tables stay FP32 per locked semantics."""
     t, hq, hkv, d = cfg.num_requests, cfg.num_q_heads, cfg.num_kv_heads, cfg.head_dim
     dt = cfg.dtype
+    request_mapping = cfg.request_mapping if request_mapping is None else request_mapping
+    layout = cfg.layout if layout is None else layout
     g = torch.Generator(device=device).manual_seed(seed)
     q, k, v = _build_qkv(t, hq, hkv, d, dt, device, g, layout)
     cos, sin = build_rope_tables(cfg.cache_alloc_len, d, theta=10000.0, device=device,
@@ -118,7 +126,7 @@ def make_thunk(fn, args, position_sets):
 
 
 def build_matrix(quick=False, position_modes=(pos.RAGGED,), head_labels=None,
-                 batches=None, allocs=None, dtypes=None):
+                 batches=None, allocs=None, dtypes=None, include_serving_variants=True):
     if quick:
         batches = batches or [1, 32]
         allocs = allocs or [2048]
@@ -131,6 +139,12 @@ def build_matrix(quick=False, position_modes=(pos.RAGGED,), head_labels=None,
         heads = HEAD_CONFIGS
     if head_labels:
         heads = [h for h in heads if h[0] in head_labels]
+    variants = [pair for pair in itertools.product(LAYOUTS, REQUEST_MAPPINGS)
+                if pair != (PACKED, IDENTITY)]
     for (hl, hq, hkv, hd), b, alloc, dl, pm in itertools.product(
             heads, batches, allocs, dtypes, position_modes):
         yield Config(hl, hq, hkv, hd, b, alloc, dl, pm)
+        if include_serving_variants and b in SERVING_VARIANT_BATCHES:
+            for layout, request_mapping in variants:
+                yield Config(hl, hq, hkv, hd, b, alloc, dl, pm,
+                             layout, request_mapping)

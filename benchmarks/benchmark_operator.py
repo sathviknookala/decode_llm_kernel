@@ -28,6 +28,9 @@ from benchmarks.impls import DEFAULT_IMPLS, IMPL_LABELS, resolve_impls
 from benchmarks.validation import validate_candidate
 from benchmarks.workload import (
     Config,
+    IDENTITY,
+    PACKED,
+    SERVING_VARIANT_BATCHES,
     build_matrix,
     build_op_args,
     build_position_sets,
@@ -157,6 +160,10 @@ def _run_benchmark(args, device, specs, modes, clock_status):
         "compile_mode": args.compile_mode,
         "footprint_budget_gb": args.footprint_budget_gb,
         "clock_lock": clock_status,
+        "timing_matrix": {
+            "main": {"layout": PACKED, "request_mapping": IDENTITY},
+            "serving_variant_batches": list(SERVING_VARIANT_BATCHES),
+        },
     })
 
     bw_ref = None
@@ -225,10 +232,13 @@ def _run_benchmark(args, device, specs, modes, clock_status):
         print("CUDA graph device-median latency removed:")
         for s in savings:
             cfg = s["config"]
+            variant = ""
+            if (cfg["layout"], cfg["request_mapping"]) != (PACKED, IDENTITY):
+                variant = f" {cfg['layout']}/{cfg['request_mapping']}"
             print(f"  {s['graph_impl']} vs {s['direct_impl']}: "
                   f"{s['latency_removed_pct']:.1f}% at {cfg['head_label']} "
                   f"b={cfg['num_requests']} alloc={cfg['cache_alloc_len']} "
-                  f"{cfg['dtype_label']} {cfg['position_mode']}")
+                  f"{cfg['dtype_label']} {cfg['position_mode']}{variant}")
     print(f"wrote {args.out}\nwrote {meta_path}")
     if n_fail:
         print(f"\nFAILED: {n_fail} configuration(s) did not validate; their timings were "

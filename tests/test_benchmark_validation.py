@@ -10,9 +10,10 @@ from benchmarks.validation import (
     validate_candidate,
     validate_once,
     validate_or_raise,
+    validation_cases,
 )
 from benchmarks.impls import eager_impl
-from benchmarks.workload import IDENTITY, PACKED, Config
+from benchmarks.workload import IDENTITY, PACKED, PERMUTED, STRIDED, Config
 from decode_kernels.reference import apply_rope, fused_rope_kv_append_ref
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -168,6 +169,16 @@ def test_validation_covers_both_position_modes():
                                "permuted-requests", "strided-qkv"]
     assert uniform["cases"] == ["uniform[0]", "uniform[1]",
                                 "permuted-requests", "strided-qkv"]
+
+
+def test_timed_cases_use_the_swept_layout_and_request_mapping():
+    cfg = Config("mha", 8, 8, 64, 4, 128, "bf16", pos.RAGGED,
+                 STRIDED, PERMUTED)
+    cases = validation_cases(cfg, DEVICE, SEED)
+    assert cases[0].layout == STRIDED
+    assert cases[0].request_mapping == PERMUTED
+    assert cases[2].layout == STRIDED
+    assert cases[2].request_mapping == PERMUTED
 
 
 def test_addressing_contract_accepts_valid_inputs():

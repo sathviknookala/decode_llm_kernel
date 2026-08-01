@@ -6,7 +6,16 @@ import torch
 from benchmarks import positions as pos
 from benchmarks.benchmark_operator import bench_impl, graph_savings, run_config
 from benchmarks.impls import DirectRunner
-from benchmarks.workload import Config, build_op_args, build_position_sets
+from benchmarks.workload import (
+    IDENTITY,
+    PACKED,
+    PERMUTED,
+    STRIDED,
+    Config,
+    build_matrix,
+    build_op_args,
+    build_position_sets,
+)
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
@@ -79,3 +88,36 @@ def test_graph_savings_pairs_matching_configs_only():
     assert len(got) == 1
     assert got[0]["latency_removed_pct"] == pytest.approx(75.0)
     assert got[0]["config"]["num_requests"] == CFG.num_requests
+
+
+def test_serving_layout_matrix_is_crossed_only_at_b1_and_b32():
+    cfgs = list(build_matrix(
+        quick=True, head_labels=["mha"], batches=[1, 8, 32], allocs=[128],
+        dtypes=["bf16"], position_modes=(pos.RAGGED,)))
+    main = [c for c in cfgs if (c.layout, c.request_mapping) == (PACKED, IDENTITY)]
+    variants = [c for c in cfgs if c not in main]
+    assert [c.num_requests for c in main] == [1, 8, 32]
+    assert {c.num_requests for c in variants} == {1, 32}
+    assert {(c.layout, c.request_mapping) for c in variants} == {
+        (PACKED, PERMUTED), (STRIDED, IDENTITY), (STRIDED, PERMUTED),
+    }
+    assert len(variants) == 6
+
+
+def test_config_columns_and_label_preserve_the_main_matrix_names():
+    assert CFG.as_row()["layout"] == PACKED
+    assert CFG.as_row()["request_mapping"] == IDENTITY
+    assert CFG.label() == "mha_b4_alloc128_fp32_ragged"
+    variant = Config("mha", 8, 8, 64, 4, 128, "fp32", pos.RAGGED,
+                     STRIDED, PERMUTED)
+    assert variant.label().endswith("_strided_permuted")
+
+
+def test_timed_config_builds_strided_qkv_and_permuted_requests():
+    cfg = Config("mha", 8, 8, 64, 4, 128, "fp32", pos.RAGGED,
+                 STRIDED, PERMUTED)
+    positions = build_position_sets(cfg, SEED, "cuda", num_sets=1)[0]
+    op_args = build_op_args(cfg, "cuda", SEED, positions)
+    assert not op_args.q.is_contiguous()
+    assert op_args.q.stride(-1) == 1
+    assert not torch.equal(op_args.request_indices, torch.arange(4, device="cuda"))
