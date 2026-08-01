@@ -1,6 +1,6 @@
 {
   "environment": {
-    "timestamp_utc": "2026-07-25T20:45:55.621509+00:00",
+    "timestamp_utc": "2026-08-01T04:20:23.834108+00:00",
     "gpu_name": "NVIDIA RTX PRO 4000 Blackwell",
     "gpu_vram_bytes": 25151537152,
     "gpu_vram_gib": 23.42,
@@ -21,26 +21,30 @@
     "cli_args": {
       "buffer_mib": 512,
       "warmup": 10,
-      "iters": 30,
+      "iters": 50,
+      "size_sweep_mib": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        512
+      ],
+      "device_index": 0,
+      "lock_clocks": false,
       "out": "/home/sathvik/decode_llm_kernel/results/raw/bandwidth_reference.json"
     },
-    "git_sha": "1db04be5b5e4230ac648c561e28db810b4b85478",
+    "gpu_state_start": {
+      "clocks.sm": "22",
+      "clocks.mem": "405",
+      "temperature.gpu": "40",
+      "power.draw": "6.28",
+      "clocks_throttle_reasons.active": "0x0000000000000004"
+    },
+    "git_sha": "8861d5b177d02b42e6ad85cd47d4dda70c7613bb",
     "git_branch": "main",
-    "git_dirty": true,
-    "git_dirty_files": [
-      "M benchmarks/benchmark_operator.py",
-      "M benchmarks/benchmark_utils.py",
-      "M decode_kernels/reference/rope_cache.py",
-      "?? benchmarks/__init__.py",
-      "?? benchmarks/bandwidth_reference.py",
-      "?? benchmarks/positions.py",
-      "?? benchmarks/profile_operator.py",
-      "?? benchmarks/validation.py",
-      "?? benchmarks/workload.py",
-      "?? tests/test_benchmark_bytes.py",
-      "?? tests/test_benchmark_validation.py",
-      "?? tests/test_positions.py"
-    ],
+    "git_dirty": false,
+    "git_dirty_files": [],
     "dynamo.recompile_limit": 8,
     "dynamo.cache_size_limit": 8,
     "dynamo.accumulated_recompile_limit": 256,
@@ -51,25 +55,39 @@
     "inductor.coordinate_descent_tuning": false,
     "inductor.freezing": false,
     "inductor.debug": false,
-    "inductor.triton.cudagraphs": false
+    "inductor.triton.cudagraphs": false,
+    "clock_lock": {
+      "requested": false,
+      "locked": false,
+      "target_sm_mhz": null
+    },
+    "gpu_state_end": {
+      "clocks.sm": "2475",
+      "clocks.mem": "13365",
+      "temperature.gpu": "42",
+      "power.draw": "66.00",
+      "clocks_throttle_reasons.active": "0x0000000000000000"
+    }
   },
   "bandwidth_reference": {
-    "reference_gbps": 553.2196496140748,
+    "reference_gbps": 553.0783177826706,
     "reference_source": "copy_ median",
+    "scattered_write_reference_gbps": 347.4406838193079,
+    "scattered_write_reference_source": "torch.compile scattered K/V slot writes",
     "l2_cache_bytes": 50331648,
     "buffer_mib": 512,
     "warmup": 10,
-    "iters": 30,
+    "iters": 50,
     "copy": {
       "kernel": "copy_ (d2d)",
       "byte_convention": "read src + write dst = 2 * buffer_bytes",
       "buffer_bytes": 536870912,
       "buffer_mib": 512,
       "bytes_moved_per_iter": 1073741824,
-      "median_ms": 1.9408960342407227,
-      "min_ms": 1.9360640048980713,
-      "gbps_median": 553.2196496140748,
-      "gbps_best": 554.6003754439563
+      "median_ms": 1.9413920044898987,
+      "min_ms": 1.9341440200805664,
+      "gbps_median": 553.0783177826706,
+      "gbps_best": 555.1509157809631
     },
     "triad": {
       "kernel": "add_ (y += a*x)",
@@ -77,10 +95,96 @@
       "buffer_bytes": 536870912,
       "buffer_mib": 512,
       "bytes_moved_per_iter": 1610612736,
-      "median_ms": 2.8198879957199097,
-      "min_ms": 2.8136000633239746,
-      "gbps_median": 571.1619533983708,
-      "gbps_best": 572.4384062236725
+      "median_ms": 2.8203680515289307,
+      "min_ms": 2.8084800243377686,
+      "gbps_median": 571.0647357272685,
+      "gbps_best": 573.4819981067081
+    },
+    "copy_size_sweep": [
+      {
+        "kernel": "copy_ (d2d)",
+        "byte_convention": "read src + write dst = 2 * buffer_bytes",
+        "buffer_bytes": 1048576,
+        "buffer_mib": 1,
+        "bytes_moved_per_iter": 2097152,
+        "median_ms": 0.007280000019818544,
+        "min_ms": 0.006624000146985054,
+        "gbps_median": 288.07032888610786,
+        "gbps_best": 316.59902679116465
+      },
+      {
+        "kernel": "copy_ (d2d)",
+        "byte_convention": "read src + write dst = 2 * buffer_bytes",
+        "buffer_bytes": 4194304,
+        "buffer_mib": 4,
+        "bytes_moved_per_iter": 8388608,
+        "median_ms": 0.007391999941319227,
+        "min_ms": 0.005919999908655882,
+        "gbps_median": 1134.8225198312043,
+        "gbps_best": 1416.9946164584671
+      },
+      {
+        "kernel": "copy_ (d2d)",
+        "byte_convention": "read src + write dst = 2 * buffer_bytes",
+        "buffer_bytes": 16777216,
+        "buffer_mib": 16,
+        "bytes_moved_per_iter": 33554432,
+        "median_ms": 0.014015999622642994,
+        "min_ms": 0.012512000277638435,
+        "gbps_median": 2394.0091968747247,
+        "gbps_best": 2681.779991642807
+      },
+      {
+        "kernel": "copy_ (d2d)",
+        "byte_convention": "read src + write dst = 2 * buffer_bytes",
+        "buffer_bytes": 67108864,
+        "buffer_mib": 64,
+        "bytes_moved_per_iter": 134217728,
+        "median_ms": 0.24134400486946106,
+        "min_ms": 0.2372480034828186,
+        "gbps_median": 556.1262152444853,
+        "gbps_best": 565.7275341822634
+      },
+      {
+        "kernel": "copy_ (d2d)",
+        "byte_convention": "read src + write dst = 2 * buffer_bytes",
+        "buffer_bytes": 268435456,
+        "buffer_mib": 256,
+        "bytes_moved_per_iter": 536870912,
+        "median_ms": 0.9694079756736755,
+        "min_ms": 0.959168016910553,
+        "gbps_median": 553.8131782203562,
+        "gbps_best": 559.7256190101529
+      },
+      {
+        "kernel": "copy_ (d2d)",
+        "byte_convention": "read src + write dst = 2 * buffer_bytes",
+        "buffer_bytes": 536870912,
+        "buffer_mib": 512,
+        "bytes_moved_per_iter": 1073741824,
+        "median_ms": 1.9413920044898987,
+        "min_ms": 1.9341440200805664,
+        "gbps_median": 553.0783177826706,
+        "gbps_best": 555.1509157809631
+      }
+    ],
+    "scattered_write": {
+      "kernel": "torch.compile scattered K/V slot writes",
+      "byte_convention": "read K/V sources + write K/V cache slots = 4 * slot_bytes",
+      "num_requests": 128,
+      "cache_alloc_len": 2048,
+      "num_kv_heads": 32,
+      "head_dim": 128,
+      "dtype": "float32",
+      "slot_bytes_per_cache": 16384,
+      "cache_footprint_bytes": 8589934592,
+      "position_sets": 8,
+      "seed": 1234,
+      "bytes_moved_per_iter": 8388608,
+      "median_ms": 0.024144000373780727,
+      "min_ms": 0.02191999927163124,
+      "gbps_median": 347.4406838193079,
+      "gbps_best": 382.691983519201
     }
   }
 }
