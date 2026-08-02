@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -5,6 +7,7 @@ from benchmarks.anchor_models import (
     ANCHOR_MODELS,
     LLAMA2_7B,
     MISTRAL_7B,
+    _num_kv_heads,
     by_head_label,
     published_shape,
 )
@@ -42,6 +45,30 @@ def test_head_labels_are_unique():
 def test_unknown_head_label_raises():
     with pytest.raises(KeyError):
         by_head_label("sideways")
+
+
+def test_multi_query_config_reports_one_kv_head():
+    """Falcon-7B's shape: no num_key_value_heads at all, and a num_kv_heads field that its
+    own attention ignores while multi_query is set. Read literally it looks like MHA."""
+    falcon = SimpleNamespace(num_attention_heads=71, num_kv_heads=71, multi_query=True,
+                             new_decoder_architecture=False)
+    assert _num_kv_heads(falcon) == 1
+
+
+def test_new_decoder_architecture_honours_num_kv_heads():
+    falcon_40b = SimpleNamespace(num_attention_heads=128, num_kv_heads=8, multi_query=True,
+                                 new_decoder_architecture=True)
+    assert _num_kv_heads(falcon_40b) == 8
+
+
+def test_standard_config_reads_num_key_value_heads():
+    mistral = SimpleNamespace(num_attention_heads=32, num_key_value_heads=8)
+    assert _num_kv_heads(mistral) == 8
+
+
+def test_config_without_any_kv_field_falls_back_to_mha():
+    llama = SimpleNamespace(num_attention_heads=32)
+    assert _num_kv_heads(llama) == 32
 
 
 @pytest.mark.parametrize("model", ANCHOR_MODELS, ids=lambda m: m.head_label)

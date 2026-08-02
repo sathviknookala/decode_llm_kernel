@@ -76,6 +76,18 @@ def _rope_theta(cfg):
     return float(theta)
 
 
+def _num_kv_heads(cfg):
+    # Falcon predates num_key_value_heads: it declares multi-query with a flag, and its
+    # num_kv_heads field is stale and ignored unless the new decoder architecture is on.
+    if getattr(cfg, "multi_query", False) and not getattr(cfg, "new_decoder_architecture", False):
+        return 1
+    for name in ("num_key_value_heads", "num_kv_heads"):
+        value = getattr(cfg, name, None)
+        if value is not None:
+            return int(value)
+    return int(cfg.num_attention_heads)
+
+
 def published_shape(model_id):
     """Attention shape as published on the Hub, for cross-checking the declarations above.
 
@@ -88,7 +100,7 @@ def published_shape(model_id):
     head_dim = getattr(cfg, "head_dim", None) or cfg.hidden_size // cfg.num_attention_heads
     return {
         "num_q_heads": cfg.num_attention_heads,
-        "num_kv_heads": getattr(cfg, "num_key_value_heads", cfg.num_attention_heads),
+        "num_kv_heads": _num_kv_heads(cfg),
         "head_dim": head_dim,
         "hidden_size": cfg.hidden_size,
         "rope_theta": _rope_theta(cfg),
