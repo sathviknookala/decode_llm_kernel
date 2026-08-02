@@ -9,79 +9,76 @@ provenance for each run is in the adjacent `*.env.json`.
 
 ---
 
-## `raw/operator_baseline_v2.csv` (+ `operator_baseline_v2.env.json`)
+## `raw/operator_baseline_v3.csv` (+ `operator_baseline_v3.env.json`)
 
-**`logical_eff_gbps` and `pct_of_empirical_bw` are not physical DRAM traffic.** The numerator
-is a logical floor: it excludes intermediates an implementation materializes (eager's
-`rotate_half` concatenation, gathered trig rows, cast temporaries), excludes whole-sector
-overhead on scattered writes, and counts bytes that may be served from L2. The denominator is
-streaming throughput on a different access pattern. Treat the ratio as orientation, not an
-efficiency score. **Blocker:** measured traffic needs Nsight Compute counters, not yet run.
+1908 rows (1904 timed), four impls, four head layouts, 0 validation failures. Provenance is a
+clean `df96e9c`; each row names the gate cases that cleared it in `validation_cases`.
 
-**v2 has only the streaming denominator.** The current rig additionally emits
-`pct_of_scattered_write_bw`, based on random K/V writes into an MHA b=128, alloc=2048, FP32 cache.
-That fixes the access-pattern mismatch but not the byte-mix mismatch: the operator numerator counts
-all logical traffic, while the scattered reference counts K/V source reads and K/V cache writes.
-Neither column is an efficiency score, and the scattered ratio can exceed 100%.
+**Every row in this file is overhead-bound, so the bandwidth columns describe almost nothing.**
+At b=128 the four layouts move KV traffic differing by 64x (mha 8192 bytes per token, mqa 128)
+and the compiled device medians are 0.0272 ms and 0.0304 ms respectively -- the layout carrying
+64x the bytes is the faster one. No configuration here is limited by memory traffic. Do not read
+any latency in this file as evidence about a memory system.
 
-**The timed region is an operator call, not a bare kernel.** It includes PyTorch dispatch and
-one iterator step for position rotation. That is identical across implementations, so
-comparisons are fair, but these are not pure kernel times.
+**`pct_of_empirical_bw` is not an efficiency score, and this file proves it.** 16 rows exceed
+100%, peaking at **180% of empirical bandwidth and 273% of the scattered reference**
+(`graph_compile`, mha, b=128, fp32, uniform). The numerator is a logical byte count that ignores
+where bytes are served from; uniform positions rewrite one slot per request, which stays
+L2-resident. v2 reported 88% on this column and it read like saturation. It was not.
+**Blocker:** real traffic needs Nsight Compute counters, still not run.
 
-**This file predates the CUDA-graph baseline now available in the rig.** Its direct-path
-"dispatch share" remains arithmetic, not a graph comparison. In subsequent runs `graph_eager`
-and `graph_compile` bind every other input pointer at capture and copy each next position set into
-a static buffer before replay. That copy is a real launch inside the timed region, matching the
-dynamic-position serving contract rather than presenting replay alone as the operator cost.
+**The launch share is measured, but its floor is not decomposed.** `graph_eager` and
+`graph_compile` remove 62-69% of the corresponding direct path's device median, and
+`graph_compile` sits at ~0.0107 ms in essentially every configuration. That flatness suggests a
+fixed cost rather than work, but the graph thunk is **two** launches -- `positions.copy_()` into
+the static buffer, then `replay()` -- and this file does not separate them. Until it does, the
+addressable headroom below the graph path is unknown.
 
-**This file predates start/end clock-state capture.** The rig now records SM and memory clocks,
-temperature, power draw, and active throttle reasons at both boundaries. On this machine the
-opt-in clock lock is unavailable to the current user: `nvidia-smi -lgc` reports that permission to
-change clocks is required, so the rig logs the denial and continues unlocked before restoring only
-locks it actually acquired. Do not retroactively read v2's few-percent deltas as clock-controlled.
+**The graph path's timed region includes the position copy, deliberately.** Capture binds every
+other input pointer, so serving with dynamic positions requires that copy. Presenting replay
+alone would measure a workload that cannot be run.
 
-**Two configurations are unmeasured, not measured-and-fast.** `mha b=128 alloc=2048 fp32`
-(both position modes) is skipped: it needs 17.2 GB peak contiguous cache (2 sets × 8.6 GB)
-against a 12 GB budget on a 23.4 GiB card. Rows are present with `impl=skipped` and the
-reason. This is a preview of why paged caches exist, not a gap in the sweep.
+**The ragged-positions finding changed shape and is not settled.** Compiled b=1 reproduces v2's
+penalty at 1.41x ragged-over-uniform, but `graph_eager` and `graph_compile` show 1.00x at the
+same configurations. The access pattern is identical, so v2's "rewriting one slot kept it
+L2-resident" explanation cannot be the whole story -- but the graph floor may simply be too
+coarse to resolve a difference this small. Treat the mechanism as open.
 
-**Coverage bounds of the matrix.** Every row in this file has `head_dim` 128 (the Llama-2
-anchor), and rotary is always full — no partial-rotary or awkward head dims (Checkpoint D).
-Contiguous token-major cache only; no paged, fragmented, or head-major layouts (Checkpoint F).
-Head configurations are MHA 32/32 and GQA 32/8 only; MQA is covered in the byte-formula tests
-but not benchmarked. `torch.compile` is measured with one backend and default mode, recorded
-in the env JSON; other modes are unexplored.
+**Strided QKV was measured and costs nothing here.** strided-over-packed device median is 0.993
+at b=1 and 1.002 at b=32. That is a real answer to v2's open question, bounded to those two
+batch sizes: the serving cross runs only at b in {1, 32}, so nothing is established at b=8 or
+b=128.
 
-**This file predates the wider anchor registry.** The rig now sweeps four real attention
-shapes across three head dims — `mqa` (Falcon-7B, 71:1 @ 64) and `mha96` (Phi-3-mini-4k,
-32:32 @ 96) joined `mha` and `gqa`. So the two bounds above, single `head_dim` and no
-benchmarked MQA, are properties of **this file**, not of the measurement rig. Nothing here
-says how latency moves with head dim, and the flat behaviour visible in newer smoke runs at
-b ≤ 32 is a dispatch-bound regime rather than evidence that head dim does not matter — the
-byte-bound end of the sweep is where it would show.
+**Four configurations are unmeasured, not measured-and-fast.** `mha` and `mha96` at b=128,
+alloc=2048, fp32 need 17.2 GB and 12.9 GB peak contiguous cache (2 sets each) against a 12 GB
+budget. Rows are present with `impl=skipped`. A preview of why paged caches exist.
 
-**GQA shapes are real; GQA tensors are not.** The swept GQA layout (32 q heads : 8 kv heads,
-`head_dim` 128, `rope_theta` 10000) is the attention shape of **Mistral-7B-v0.1**
-(Apache-2.0, ungated; Jiang et al. 2023, arXiv:2310.06825), cross-checked against its
-published `config.json` by `tests/test_anchor_models.py`, and our RoPE tables are bit-exact
-against `MistralRotaryEmbedding`. That establishes the *configuration* is real, **not** that
-the numbers are: every timed tensor is still synthetic `randn`, no model weights are loaded,
-and no real activation distribution or decode loop is involved. Latency here is dtype- and
-shape-driven, so synthetic inputs are appropriate — but nothing in this file is a measurement
-of Mistral-7B-v0.1 the model.
+**The timed region is an operator call, not a bare kernel.** For direct impls it includes
+PyTorch dispatch and one iterator step for position rotation. Identical across implementations,
+so comparisons are fair, but these are not pure kernel times.
 
-**Timed rows use the identity request mapping and packed Q/K/V.** Non-identity mappings and
-fused-projection strides are exercised by the validation gate, not by the timing path, so this
-file says nothing about their cost. The current rig adds explicit columns and an adjacent-control
-supplemental cross at b∈{1,32}; those measurements belong to the subsequent baseline, not v2.
+**Clock state is recorded at both boundaries but not controlled.** `nvidia-smi -lgc` is
+unavailable to this user (permission denied); the rig logs the denial and continues unlocked.
+Treat few-percent differences as noise.
 
-**The attention consumer is not modelled at all.** This operator only writes the cache. A
-layout or kernel that speeds writes may slow the attention reads that follow, and that
-trade-off is invisible in this file.
+**Shapes are real; tensors are not.** All four layouts are real released models' attention
+shapes -- `mha` Llama-2-7B, `gqa` Mistral-7B-v0.1, `mqa` Falcon-7B, `mha96` Phi-3-mini-4k --
+cross-checked against published `config.json` by `tests/test_anchor_models.py`, and the RoPE
+tables are bit-exact against `MistralRotaryEmbedding`. Every timed tensor is still synthetic
+`randn`: no weights, no real activation distribution, no decode loop.
 
-**`cache_alloc_len` is an allocation size.** Flat latency across it is the expected result and
-is not evidence about launch-bounding — the operator touches one RoPE row and one K/V slot per
-request and never scans the context.
+**Coverage bounds.** Rotary is always full -- no partial-rotary (Checkpoint D). Contiguous
+token-major cache only; no paged, fragmented, or head-major layouts (Checkpoint F).
+`torch.compile` runs one backend at default mode, recorded in the env JSON. `rope_theta` is
+10000 for every row, which is why anchors at other thetas were not adopted.
+
+**The attention consumer is not modelled at all.** This operator only writes the cache. A layout
+or kernel that speeds writes may slow the attention reads that follow, and that trade-off is
+invisible here.
+
+**`cache_alloc_len` is an allocation size.** Flat latency across it is expected and is not
+evidence about launch-bounding -- the operator touches one RoPE row and one K/V slot per request
+and never scans the context.
 
 ---
 
@@ -115,7 +112,7 @@ measured span is host-side dispatch follows from the arithmetic (1.8 µs of GPU 
 graph-vs-direct latency for the measured recoverable launch share.
 
 **Profiling perturbs what it measures.** Reported device times come from profiled runs and are
-not the timing path's numbers; use `operator_baseline_v2.csv` for latency.
+not the timing path's numbers; use `operator_baseline_v3.csv` for latency.
 
 **Narrow config coverage.** bf16, ragged positions, `alloc=2048`, b∈{1,32}, MHA and GQA only.
 Kernel counts for other dtypes and batch sizes are not established, though the inductor fusion
@@ -131,8 +128,20 @@ counters — so no statement here explains *why* a kernel takes the time it does
 
 ---
 
+## `raw/archive/operator_baseline_v2_preV3.csv`
+
+Superseded and **not comparable** to v3, and not regenerable from any committed state: its
+`env.json` records a dirty tree at `1db04be`, a commit containing neither `validation.py` nor
+`workload.py`. See `raw/archive/README.md` for the six reasons (provenance, autograd state,
+added impls, added head layouts, added serving-layout columns, gate strength). Several claims
+derived from it -- "3.8-4.0x eager at b>=8", "88% of achievable, near-saturated" -- are
+contradicted by v3.
+
+---
+
 ## `raw/archive/operator_baseline_v1_preB1.csv`
 
-Superseded and **not comparable** to v2. See `raw/archive/README.md` for the five reasons
-(byte accounting, latency naming, uniform-only positions, no validation gate, column rename).
+Superseded and **not comparable** to anything later. See `raw/archive/README.md` for the five
+reasons (byte accounting, latency naming, uniform-only positions, no validation gate, column
+rename).
 Retained only so earlier claims can be traced to the data that produced them.
