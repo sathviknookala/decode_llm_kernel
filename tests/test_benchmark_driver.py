@@ -5,7 +5,7 @@ import torch
 
 from benchmarks import positions as pos
 from benchmarks.benchmark_operator import bench_impl, graph_savings, run_config
-from benchmarks.impls import DirectRunner
+from benchmarks.impls import DirectRunner, resolve_impls
 from benchmarks.workload import (
     IDENTITY,
     PACKED,
@@ -74,6 +74,18 @@ def test_capture_failure_becomes_an_error_row():
     assert rows[0]["validation"] == "ERROR"
     assert "capture permission denied" in rows[0]["validation_detail"]
     assert rows[0]["device_median_ms"] == ""
+
+
+def test_passing_rows_name_the_gate_that_cleared_them():
+    """A count alone is not provenance: the committed v2 CSV said cases=2 both before and
+    after the gate gained cases, so the rows could not be told apart."""
+    args = SimpleNamespace(seed=SEED, compile_mode=None, compile_backend="inductor",
+                           warmup=1, iters=1)
+    rows = run_config(CFG, "cuda", args, None, resolve_impls(["eager"]))
+    cases = rows[0]["validation_cases"].split("|")
+    assert rows[0]["validation"] == "pass"
+    assert {"permuted-requests", "strided-qkv"}.issubset(cases)
+    assert f"cases={len(cases)}" in rows[0]["validation_detail"]
 
 
 def test_graph_savings_pairs_matching_configs_only():

@@ -124,6 +124,7 @@ def run_config(cfg, device, args_ns, bw_ref_gbps, specs, scattered_ref_gbps=None
             detail = "; ".join(report["failures"])
             print(f"  VALIDATION FAILED  {spec.label:14s} {cfg.label()}: {detail}", flush=True)
             rows.append({**base, "validation": "FAIL", "validation_detail": detail,
+                         "validation_cases": "|".join(report["cases"]),
                          **_blank_metrics()})
             _release(runner)
             continue
@@ -135,6 +136,7 @@ def run_config(cfg, device, args_ns, bw_ref_gbps, specs, scattered_ref_gbps=None
                      "validation_detail": (f"q_maxdiff={report['max_abs_diff_q']:.2e} "
                                            f"k_maxdiff={report['max_abs_diff_k_cache']:.2e} "
                                            f"cases={report['num_cases']}"),
+                     "validation_cases": "|".join(report["cases"]),
                      **timed})
         _release(runner)
     return rows
@@ -225,6 +227,10 @@ def _run_benchmark(args, device, specs, modes, clock_status):
     write_json(meta_path, {"environment": meta, "summary": {
         "rows_total": len(all_rows), "rows_timed": n_timed,
         "validation_failures": n_fail, "configs_skipped": n_skip,
+        # Which gate cleared these rows, by name. A count alone let the gate change under a
+        # committed CSV once already.
+        "validation_case_sets": sorted({r["validation_cases"] for r in all_rows
+                                        if r.get("validation_cases")}),
         "graph_savings": savings}})
 
     print(f"\ntimed rows: {n_timed} | validation failures: {n_fail} | skipped configs: {n_skip}")
