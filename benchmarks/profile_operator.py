@@ -179,7 +179,8 @@ def main():
     ap.add_argument("--impls", nargs="+", default=["eager", "compile"],
                     help=f"subset of {list(IMPL_LABELS)}")
     ap.add_argument("--single", metavar="HEAD_LABEL",
-                    help="profile one config only (for wrapping under nsys): mha|gqa")
+                    help=f"profile one config only (for wrapping under nsys): "
+                         f"{'|'.join(sorted({c.head_label for c in REPRESENTATIVE}))}")
     ap.add_argument("--single-batch", type=int, default=32)
     ap.add_argument("--no-trace", action="store_true",
                     help="run the workload without the PyTorch profiler (nsys wraps it instead)")

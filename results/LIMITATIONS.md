@@ -45,12 +45,20 @@ locks it actually acquired. Do not retroactively read v2's few-percent deltas as
 against a 12 GB budget on a 23.4 GiB card. Rows are present with `impl=skipped` and the
 reason. This is a preview of why paged caches exist, not a gap in the sweep.
 
-**Coverage bounds of the matrix.** `head_dim` is fixed at 128 (the Llama-2 anchor) and rotary
-is always full — no partial-rotary or awkward head dims (Checkpoint D). Contiguous
-token-major cache only; no paged, fragmented, or head-major layouts (Checkpoint F). Head
-configurations are MHA 32/32 and GQA 32/8 only; MQA is covered in the byte-formula tests but
-not benchmarked. `torch.compile` is measured with one backend and default mode, recorded in
-the env JSON; other modes are unexplored.
+**Coverage bounds of the matrix.** Every row in this file has `head_dim` 128 (the Llama-2
+anchor), and rotary is always full — no partial-rotary or awkward head dims (Checkpoint D).
+Contiguous token-major cache only; no paged, fragmented, or head-major layouts (Checkpoint F).
+Head configurations are MHA 32/32 and GQA 32/8 only; MQA is covered in the byte-formula tests
+but not benchmarked. `torch.compile` is measured with one backend and default mode, recorded
+in the env JSON; other modes are unexplored.
+
+**This file predates the wider anchor registry.** The rig now sweeps four real attention
+shapes across three head dims — `mqa` (Falcon-7B, 71:1 @ 64) and `mha96` (Phi-3-mini-4k,
+32:32 @ 96) joined `mha` and `gqa`. So the two bounds above, single `head_dim` and no
+benchmarked MQA, are properties of **this file**, not of the measurement rig. Nothing here
+says how latency moves with head dim, and the flat behaviour visible in newer smoke runs at
+b ≤ 32 is a dispatch-bound regime rather than evidence that head dim does not matter — the
+byte-bound end of the sweep is where it would show.
 
 **GQA shapes are real; GQA tensors are not.** The swept GQA layout (32 q heads : 8 kv heads,
 `head_dim` 128, `rope_theta` 10000) is the attention shape of **Mistral-7B-v0.1**

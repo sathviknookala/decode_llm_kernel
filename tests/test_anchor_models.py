@@ -5,6 +5,7 @@ import torch
 
 from benchmarks.anchor_models import (
     ANCHOR_MODELS,
+    FALCON_7B,
     LLAMA2_7B,
     MISTRAL_7B,
     _num_kv_heads,
@@ -25,10 +26,20 @@ def _published_or_skip(model_id):
         pytest.skip(f"cannot read published config for {model_id}: {type(e).__name__}: {e}")
 
 
-def test_head_configs_are_exactly_what_the_sweep_ran_before_the_registry():
-    """Deriving HEAD_CONFIGS from the registry must not perturb the swept matrix, or the
-    committed baseline CSV would no longer describe the same configurations."""
-    assert HEAD_CONFIGS == [("mha", 32, 32, 128), ("gqa", 32, 8, 128)]
+def test_head_configs_track_the_registry_in_declaration_order():
+    assert HEAD_CONFIGS == [m.head_config() for m in ANCHOR_MODELS]
+
+
+def test_the_originally_swept_layouts_are_still_swept_unchanged():
+    """New anchors may extend the matrix but must not restate the two layouts the earlier
+    baselines were measured on, or old and new CSVs stop overlapping at all."""
+    assert HEAD_CONFIGS[:2] == [("mha", 32, 32, 128), ("gqa", 32, 8, 128)]
+
+
+def test_registry_covers_more_than_one_head_dim():
+    """head_dim sets the vectorisation width, so a single-valued registry would let a kernel
+    be tuned to one width with nothing in the rig to reveal it."""
+    assert len({m.head_dim for m in ANCHOR_MODELS}) > 1
 
 
 def test_every_swept_head_layout_is_backed_by_an_anchor_model():
@@ -89,6 +100,11 @@ def test_q_heads_divide_evenly_into_kv_groups(model):
 def test_mha_anchor_really_is_mha_and_gqa_anchor_really_is_gqa():
     assert LLAMA2_7B.num_kv_heads == LLAMA2_7B.num_q_heads
     assert MISTRAL_7B.num_kv_heads < MISTRAL_7B.num_q_heads
+
+
+def test_mqa_anchor_really_is_mqa():
+    assert FALCON_7B.num_kv_heads == 1
+    assert FALCON_7B.num_q_heads > 1
 
 
 def test_the_gqa_anchor_is_ungated_which_is_why_it_was_chosen():

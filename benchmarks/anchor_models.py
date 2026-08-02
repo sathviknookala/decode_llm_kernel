@@ -55,7 +55,38 @@ MISTRAL_7B = AnchorModel(
     citation="Jiang et al. 2023, arXiv:2310.06825",
 )
 
-ANCHOR_MODELS = (LLAMA2_7B, MISTRAL_7B)
+# The narrowest head in the sweep, and the only real multi-query shape: one KV head for 71
+# query heads. max_position is exactly the largest swept cache_alloc_len -- raising that
+# sweep bound past 2048 would make this configuration unrepresentable.
+FALCON_7B = AnchorModel(
+    head_label="mqa",
+    model_id="tiiuae/falcon-7b",
+    num_q_heads=71,
+    num_kv_heads=1,
+    head_dim=64,
+    rope_theta=10000.0,
+    max_position=2048,
+    license="apache-2.0",
+    gated=False,
+    citation="Almazrouei et al. 2023, arXiv:2311.16867",
+)
+
+# Carries the sweep's only head_dim that is not a power of two; its rotary is full
+# (partial_rotary_factor 1.0), which the locked semantics require.
+PHI3_MINI_4K = AnchorModel(
+    head_label="mha96",
+    model_id="microsoft/Phi-3-mini-4k-instruct",
+    num_q_heads=32,
+    num_kv_heads=32,
+    head_dim=96,
+    rope_theta=10000.0,
+    max_position=4096,
+    license="mit",
+    gated=False,
+    citation="Abdin et al. 2024, arXiv:2404.14219",
+)
+
+ANCHOR_MODELS = (LLAMA2_7B, MISTRAL_7B, FALCON_7B, PHI3_MINI_4K)
 
 
 def by_head_label(head_label):

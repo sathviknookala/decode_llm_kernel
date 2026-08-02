@@ -10,8 +10,9 @@ from benchmarks.anchor_models import ANCHOR_MODELS
 
 DTYPES = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
 
-# Every swept head layout is a real released model's attention shape: MHA 32/32 @ 128 is
-# Llama-2-7B, GQA 32/8 @ 128 is Mistral-7B-v0.1. Provenance in anchor_models.py.
+# Every swept head layout is a real released model's attention shape, and the set spans three
+# head_dims so a kernel cannot be tuned to one vector width unnoticed. Provenance, including
+# which model each label is, in anchor_models.py.
 HEAD_CONFIGS = [m.head_config() for m in ANCHOR_MODELS]
 
 CACHE_SENTINEL = 7.5
