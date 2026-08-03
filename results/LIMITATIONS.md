@@ -20,6 +20,14 @@ and the compiled device medians are 0.0272 ms and 0.0304 ms respectively -- the 
 64x the bytes is the faster one. No configuration here is limited by memory traffic. Do not read
 any latency in this file as evidence about a memory system.
 
+**This file's own writes never leave L2, and that turns out not to matter.** The timed loop cycles
+8 position sets and reuses one set of input tensors, so it rewrites the same slots on every
+invocation -- a write working set of 0.67x L2 even at the largest configuration that fits. The
+flatness above could therefore have been an artifact of cache residency rather than a property of
+the operator. It is not: `raw/l2_residency_probe.csv` sweeps that working set to 42.67x L2 and
+latency moves 1.9%. Read the flatness as real, but read it knowing this file alone could not
+establish it.
+
 **`pct_of_empirical_bw` is not an efficiency score, and this file proves it.** 16 rows exceed
 100%, peaking at **180% of empirical bandwidth and 273% of the scattered reference**
 (`graph_compile`, mha, b=128, fp32, uniform). The numerator is a logical byte count that ignores
@@ -79,6 +87,33 @@ invisible here.
 **`cache_alloc_len` is an allocation size.** Flat latency across it is expected and is not
 evidence about launch-bounding -- the operator touches one RoPE row and one K/V slot per request
 and never scans the context.
+
+---
+
+## `raw/l2_residency_probe.csv` (+ `l2_residency_probe.env.json`)
+
+Sweeps the cache-write working set from 0.00x to 42.67x this device's 50.3 MB L2, by drawing each
+cycled position set from its own disjoint slot range. Exists to test whether the baseline sweep's
+L2-resident writes were flattering its flat-latency result.
+
+**It answers one question and is not a baseline.** No oracle is allocated and no validation gate
+runs -- the impls were already cleared by the v3 sweep, and skipping the second cache set is what
+lets `mha b=128 fp32` fit the footprint budget here. Do not quote its latencies as operator
+timings; they were measured under a deliberately hostile addressing pattern that no baseline uses.
+
+**Only the write side is swept.** Q/K/V, the trig tables and the graph's captured output buffer
+are the same allocations on every invocation, so the read side stays cache-resident throughout.
+That is a fair model of decode, where Q/K/V arrive hot from the projection, but it means the probe
+bounds cache-write cost specifically, not total memory cost.
+
+**`compile` and `graph_compile` only**, b=128 and alloc=2048 only, ragged packed/identity only,
+one seed, 100 iterations per point. Nothing here speaks to small batch, and small batch is where
+the operator is most overhead-dominated to begin with.
+
+**The marginal-rate figure is an inference, not a counter reading.** Comparing across head layouts,
+a 127x range of cache-write traffic costs 2.0 us, which implies a marginal rate near 2 TB/s and
+therefore that the stores are not being paid for at memory speed. That is arithmetic over two
+measured medians; confirming *why* still needs Nsight Compute.
 
 ---
 
