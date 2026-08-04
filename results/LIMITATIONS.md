@@ -35,12 +35,17 @@ where bytes are served from; uniform positions rewrite one slot per request, whi
 L2-resident. v2 reported 88% on this column and it read like saturation. It was not.
 **Blocker:** real traffic needs Nsight Compute counters, still not run.
 
-**The launch share is measured, but its floor is not decomposed.** `graph_eager` and
+**The launch share is measured; the floor beneath it is decomposed elsewhere.** `graph_eager` and
 `graph_compile` remove 62-69% of the corresponding direct path's device median, and
-`graph_compile` sits at ~0.0107 ms in essentially every configuration. That flatness suggests a
-fixed cost rather than work, but the graph thunk is **two** launches -- `positions.copy_()` into
-the static buffer, then `replay()` -- and this file does not separate them. Until it does, the
-addressable headroom below the graph path is unknown.
+`graph_compile` sits at ~0.0107 ms in essentially every configuration. What that flat number
+consists of is not visible in this file: `raw/graph_floor_probe.csv` splits it into a 4.3 us
+CUDA-event harness cost, a ~3.0 us position copy, a ~2.0 us replay launch, and 1.4-4.6 us of
+operator work depending on size.
+
+**Every `device_median_ms` in this file carries that 4.3 us harness cost.** It is common to all
+impls, so the ratios between them are sound, but no absolute latency here should be read as the
+operator's cost in a real decode loop, and differences smaller than a few microseconds are below
+the instrument. `amortized_call_ms` is the column to use for those.
 
 **The graph path's timed region includes the position copy, deliberately.** Capture binds every
 other input pointer, so serving with dynamic positions requires that copy. Presenting replay
@@ -114,6 +119,36 @@ the operator is most overhead-dominated to begin with.
 a 127x range of cache-write traffic costs 2.0 us, which implies a marginal rate near 2 TB/s and
 therefore that the stores are not being paid for at memory speed. That is arithmetic over two
 measured medians; confirming *why* still needs Nsight Compute.
+
+---
+
+## `raw/graph_floor_probe.csv` (+ `graph_floor_probe.env.json`)
+
+A six-rung ladder isolating what a `graph_compile` sample consists of: a Python call that launches
+nothing, the position copy alone, replay of a graph holding one trivial kernel, both launches
+together, the operator graph replayed with positions frozen, and `graph_compile` itself. Operator
+work is the top rung minus the two-launch rung.
+
+**The two latency definitions disagree, and the file reports both rather than choosing.** By event
+median the operator does 0.03 us of work at b=32; by amortized loop it does ~1.4 us. Event
+bracketing costs 4.3 us per sample and partially masks GPU execution, so the amortized figures are
+the ones to use here. Neither is a counter reading.
+
+**The frozen-position rung cannot serve decode** and is labelled `NOT SERVABLE` in the stage table.
+It exists only to separate the copy from the replay. Its cache writes are also L2-resident, worth
+about 2% per `raw/l2_residency_probe.csv`, so it is measured under friendlier conditions than the
+serving path.
+
+**"Minimal replay" is one trivial kernel, not an empty graph**, so the ~2.0 us attributed to replay
+launch includes that kernel's own cost. It is an upper bound on pure replay overhead.
+
+**`compile` lineage only**, five configurations, one seed. Nothing here covers `eager` or
+`graph_eager`, and the 4.3 us harness figure is specific to this device and torch build.
+
+**Subtraction across rungs assumes the components do not interact.** They share a stream and
+serialise, which is why the arithmetic roughly closes, but the derived numbers carry about
++/- 0.5 us of run-to-run noise -- visible directly in the ladder, where nominally identical rungs
+differ by that much between configurations.
 
 ---
 
