@@ -1,0 +1,31 @@
+head_label,num_q_heads,num_kv_heads,head_dim,num_requests,cache_alloc_len,dtype_label,position_mode,layout,request_mapping,stage,description,device_median_us,device_min_us,amortized_call_us,synchronized_call_us
+mha,32,32,128,1,2048,bf16,ragged,packed,identity,harness_noop,CUDA-event bracketing around a Python call that launches nothing,4.31999983265996,0.35200000274926424,0.031460076570510864,3.0561350286006927
+mha,32,32,128,1,2048,bf16,ragged,packed,identity,positions_copy,"the static-position copy_ alone, one launch",7.327999919652939,3.2319999299943447,3.582706364492575,7.92450737208128
+mha,32,32,128,1,2048,bf16,ragged,packed,identity,minimal_replay,replay of a graph holding one trivial kernel,7.74399982765317,7.2639998979866505,2.5490066036581993,6.661983206868172
+mha,32,32,128,1,2048,bf16,ragged,packed,identity,copy_plus_minimal_replay,"both launches, no operator work",12.000000104308128,9.344000369310379,6.469880075504382,10.885065421462059
+mha,32,32,128,1,2048,bf16,ragged,packed,identity,real_replay_no_copy,"replay of the operator graph, positions frozen -- NOT SERVABLE",7.807999849319458,7.391999941319227,4.105186089873314,7.859431207180023
+mha,32,32,128,1,2048,bf16,ragged,packed,identity,graph_compile,the timed impl: position copy then operator replay,12.032000347971916,11.711999773979187,6.455253654470046,10.980525985360146
+mha,32,32,128,32,2048,bf16,ragged,packed,identity,harness_noop,CUDA-event bracketing around a Python call that launches nothing,4.239999921992421,0.31999999191612005,0.030893522004286446,3.035878762602806
+mha,32,32,128,32,2048,bf16,ragged,packed,identity,positions_copy,"the static-position copy_ alone, one launch",7.23200011998415,2.3040000814944506,2.7526868507266045,6.61192461848259
+mha,32,32,128,32,2048,bf16,ragged,packed,identity,minimal_replay,replay of a graph holding one trivial kernel,6.271999794989824,4.095999989658594,2.072013448923826,5.871057510375977
+mha,32,32,128,32,2048,bf16,ragged,packed,identity,copy_plus_minimal_replay,"both launches, no operator work",9.503999724984169,8.704000152647495,4.926257145901522,9.241979569196701
+mha,32,32,128,32,2048,bf16,ragged,packed,identity,real_replay_no_copy,"replay of the operator graph, positions frozen -- NOT SERVABLE",6.304000038653612,2.5279999244958162,3.459343376259009,6.522051990032196
+mha,32,32,128,32,2048,bf16,ragged,packed,identity,graph_compile,the timed impl: position copy then operator replay,9.535999968647957,8.704000152647495,5.188149710496267,10.174000635743141
+mha,32,32,128,128,2048,bf16,ragged,packed,identity,harness_noop,CUDA-event bracketing around a Python call that launches nothing,4.288000054657459,0.31999999191612005,0.03156019374728203,3.074994310736656
+mha,32,32,128,128,2048,bf16,ragged,packed,identity,positions_copy,"the static-position copy_ alone, one launch",7.23200011998415,1.7920000245794654,2.71057632441322,6.677466444671154
+mha,32,32,128,128,2048,bf16,ragged,packed,identity,minimal_replay,replay of a graph holding one trivial kernel,6.271999794989824,5.344000179320574,2.073246675233046,5.8409059420228004
+mha,32,32,128,128,2048,bf16,ragged,packed,identity,copy_plus_minimal_replay,"both launches, no operator work",9.440000168979168,8.671999908983707,4.906386602669954,9.172479622066021
+mha,32,32,128,128,2048,bf16,ragged,packed,identity,real_replay_no_copy,"replay of the operator graph, positions frozen -- NOT SERVABLE",6.463999859988689,4.927999805659056,6.1638071201741695,8.79692379385233
+mha,32,32,128,128,2048,bf16,ragged,packed,identity,graph_compile,the timed impl: position copy then operator replay,9.79200005531311,8.895999751985073,8.22853995487094,12.177973985671997
+mha,32,32,128,128,2048,fp32,ragged,packed,identity,harness_noop,CUDA-event bracketing around a Python call that launches nothing,4.255999810993671,0.31999999191612005,0.03152682135502497,3.116088919341564
+mha,32,32,128,128,2048,fp32,ragged,packed,identity,positions_copy,"the static-position copy_ alone, one launch",7.2639998979866505,6.3680000603199005,2.7480100591977434,6.522051990032196
+mha,32,32,128,128,2048,fp32,ragged,packed,identity,minimal_replay,replay of a graph holding one trivial kernel,6.304000038653612,1.7600000137463212,2.0712466600040593,5.826004780828953
+mha,32,32,128,128,2048,fp32,ragged,packed,identity,copy_plus_minimal_replay,"both launches, no operator work",9.40799992531538,8.448000065982342,4.910759938259919,9.16759017854929
+mha,32,32,128,128,2048,fp32,ragged,packed,identity,real_replay_no_copy,"replay of the operator graph, positions frozen -- NOT SERVABLE",8.36799992248416,6.943999789655209,6.7032501101493835,10.644551366567612
+mha,32,32,128,128,2048,fp32,ragged,packed,identity,graph_compile,the timed impl: position copy then operator replay,11.42400037497282,9.40799992531538,10.287829985221228,14.296965673565865
+mqa,71,1,64,1,2048,bf16,ragged,packed,identity,harness_noop,CUDA-event bracketing around a Python call that launches nothing,4.4479998759925365,0.31999999191612005,0.031227245926856995,3.0959490686655045
+mqa,71,1,64,1,2048,bf16,ragged,packed,identity,positions_copy,"the static-position copy_ alone, one launch",7.199999876320362,6.240000016987324,2.7222294981280966,6.551970727741718
+mqa,71,1,64,1,2048,bf16,ragged,packed,identity,minimal_replay,replay of a graph holding one trivial kernel,6.304000038653612,5.183999892324209,2.07838990415136,5.871057510375977
+mqa,71,1,64,1,2048,bf16,ragged,packed,identity,copy_plus_minimal_replay,"both launches, no operator work",9.472000412642956,8.576000109314919,4.929762799292803,9.156996384263039
+mqa,71,1,64,1,2048,bf16,ragged,packed,identity,real_replay_no_copy,"replay of the operator graph, positions frozen -- NOT SERVABLE",6.432000081986189,5.08800009265542,4.109293222427368,7.084105163812637
+mqa,71,1,64,1,2048,bf16,ragged,packed,identity,graph_compile,the timed impl: position copy then operator replay,9.600000455975533,8.608000352978706,6.131113817294439,10.239076800644398
