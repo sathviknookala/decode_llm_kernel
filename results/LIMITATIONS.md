@@ -152,6 +152,89 @@ differ by that much between configurations.
 
 ---
 
+## `raw/amdahl_probe.csv` (+ `amdahl_probe.env.json`)
+
+91 rows (90 timed, 1 skipped, 0 errors) over Mistral-7B-v0.1 in HF transformers 5.12.1: six
+ablation rungs x three execution modes x five surviving configurations. Exists to answer the one
+question the operator microbenchmarks cannot -- what fraction of a real decode step this operation
+is, and therefore what a fused kernel could win end to end.
+
+**There is no serving engine anywhere in this file, and the bias is not one-directional.** The
+denominator is HF's own decode loop; vLLM, FlashAttention, SGLang and TensorRT-LLM are not
+installed. Attention is PyTorch SDPA, the cache is HF's contiguous `StaticCache`, and there is no
+paged KV or continuous batching. Both halves of the ratio differ from a serving stack, in opposite
+directions: HF's RoPE + append is unoptimized PyTorch (`op_removed` deletes 672 of 2123 traced
+calls) where vLLM has hand-written kernels, which **inflates the numerator**; while at b=32 HF's
+step is 62-108 ms against a ~27 ms weight-bandwidth floor, which **inflates the denominator**. At
+b=1 the denominator is honest (27.9 ms measured against ~26.2 ms analytic) so only the numerator
+caveat applies. **Do not quote any number here as "X% of a serving step"** without naming the
+stack; it is a statement about HF's decode path.
+
+**Five of the six rungs are numerically invalid by construction** and are marked
+`numerically_valid=False`. `op_removed`, `rope_removed` and `append_removed` corrupt the model's
+output; `op_doubled` double-rotates Q, which feeds attention directly. All hold shapes, dtypes and
+allocations fixed, and `tests/test_amdahl_probe.py` asserts each one actually changes the logits --
+a patch that silently did nothing would report a clean 0% operator share.
+
+**The headline saving is an upper bound that is not achievable, and the file says so.** Removing
+the operation saves 2.0-5.3% depending on configuration, but **doubling it costs 0.0-0.9%** under
+both compiled modes. Mirror ratio 0.046-0.275. The two do not mirror, so most of what removal buys
+is the compiler restructuring around a deleted mutation, which no faster kernel reproduces. The
+realizable figure is the doubling slope: **0.81% at the gate configuration**, 15.7 us per layer.
+
+**The same check reads 0.99-1.65 under eager, which is the positive control.** `op_doubled` is not
+an insensitive instrument -- in eager, removal and doubling mirror each other, as a serial
+operation should. It registers ~0 only under `torch.compile` and cudagraphs, on the same operation
+in the same runs. Without those eager rows the demotion would rest on a null result.
+
+**The 0.5 mirror cutoff was chosen after seeing the data.** The measured ratio at the gate is
+0.275, so the demotion holds for any cutoff above that; `test_the_verdict_is_stable_across_
+plausible_cutoffs` checks 0.35/0.5/0.75. It is not a wide margin and the ratio is reported beside
+every verdict so the choice can be judged.
+
+**Sliding-window eviction is disabled, so this models plain-append decode, not Mistral as
+shipped.** Mistral-7B-v0.1 declares `sliding_window` 4096, which makes `StaticCache` build
+`StaticSlidingWindowLayer` for every layer; that `update()` rolls the whole cache tensor once full,
+O(window) per layer per step. Patching it away in a rung would have attributed eviction cost to
+RoPE + append and inflated the saving. `decode_loop.load_model` sets `sliding_window = None` and
+`layer_types` to all-`full_attention`, every row carries `layer_types_forced=True`, and the
+constructed layers are asserted non-sliding. Phi-3-mini-4k declares 2047, so no ungated anchor
+escapes this.
+
+**`op_replaced_ref` is this project's reference, and it loses badly** -- 3% slower at b=1, 19% at
+b=8, 21-29% at b=32, worsening with batch. The seam is numerically equivalent to HF's own path by
+test, so this is a real result about the reference, not an artifact. Two deviations are baked into
+it: HF gathers the cos/sin rows once per model step in `MistralRotaryEmbedding` rather than once
+per layer, so the per-layer operation does not include the table gather the locked signature
+implies; and HF's cache is `[B, Hkv, S, D]`, so the append writes through a transposed view.
+
+**One configuration is unmeasured, not measured-and-fast.** b=32 alloc-equivalent ctx=1024 needs
+weights 14.5 + KV 5.8 + ~3.0 GB workspace = 23.2 GB against a 22.5 GB budget on a 23.4 GB card.
+It is present with `rung=skipped` and the arithmetic as its reason. The b=32 arm therefore stops
+at ctx=512, and the batch arm at b=8/b=1 runs only at ctx=1024.
+
+**The b=32 ctx sweep goes downward on purpose.** The operator's own cost is context-independent
+but attention's KV read grows with context, so the operator's *share* peaks at small ctx --
+2.96% at 128 falling to 2.02% at 512. Gating at ctx=1024, as the plan first proposed, would have
+understated the operator's best case.
+
+**Provenance is a dirty tree, and the delta is known.** `env.json` records `fd89bfed` with
+`git_dirty=True`; the uncommitted delta is exactly the crash-safety fix, footprint guard and gate
+licensing committed as `9e9f3c4`, which is the state that regenerates this file. Unlike the
+archived v2, the producing code is committed and named. `env.json` for this probe is also written
+flat rather than nested under an `environment` key as `graph_floor_probe.env.json` is; the code was
+left as it ran rather than edited after the fact, so shape and data stay consistent.
+
+**Clocks unlocked but stable**: 2647 MHz SM at both boundaries, throttle reasons `0x0` at both.
+`nvidia-smi -lgc` remains denied to this user.
+
+**Timing is amortized step time only.** Step scale is milliseconds so the 4.3 us event floor is
+irrelevant here, but no per-layer figure in this file is measured directly -- every one is a step
+delta divided by 32. Single seed, single GPU, single model, bf16 only, one prompt length per
+configuration, no prefill measurements.
+
+---
+
 ## `raw/bandwidth_reference.json`
 
 **The continuity reference is streaming, not a bound on this operator.** Large contiguous `copy_`

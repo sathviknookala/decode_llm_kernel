@@ -82,6 +82,36 @@ A ratio above 100% means the logical byte count is being served from cache. Trea
 | strided | permuted | graph_compile | 1.001 | 96 |
 | strided | permuted | graph_eager | 1.000 | 96 |
 
+## Amdahl fraction: what a fused kernel can win end to end
+
+Source: `results/raw/amdahl_probe.csv`. Substitution ablation on a real decode loop -- `op_removed` deletes RoPE and the cache write (and their launches), so its saving is the upper bound on a fused kernel.
+
+| mode | batch | ctx | full ms/step | op_removed saving |
+|---|---|---|---|---|
+| hf_eager | 1 | 1024 | 32.267 | +3.12% |
+| hf_eager | 8 | 1024 | 58.543 | +2.54% |
+| hf_eager | 32 | 128 | 72.524 | +3.52% |
+| hf_eager | 32 | 256 | 82.866 | +2.19% |
+| hf_eager | 32 | 512 | 107.531 | +1.52% |
+| hf_compile | 1 | 1024 | 28.788 | +5.29% |
+| hf_compile | 8 | 1024 | 50.640 | +3.42% |
+| hf_compile | 32 | 128 | 62.930 | +3.64% |
+| hf_compile | 32 | 256 | 72.431 | +3.20% |
+| hf_compile | 32 | 512 | 90.055 | +2.67% |
+| hf_static_graph | 1 | 1024 | 27.893 | +4.29% |
+| hf_static_graph | 8 | 1024 | 49.457 | +2.53% |
+| hf_static_graph | 32 | 128 | 61.946 | +2.96% |
+| hf_static_graph | 32 | 256 | 71.170 | +2.43% |
+| hf_static_graph | 32 | 512 | 88.774 | +2.02% |
+
+**Gate** (pre-registered): `hf_static_graph`, b=32, ctx=128 -- the most operator-favourable configuration measured. Removing the operation saves **2.96%** of a 61.95 ms step (1832 us, 57.2 us per layer).
+
+**Validity check FAILS: doubling the operation costs only +0.81%** against a 2.96% removal saving. The two do not mirror, so most of what removal buys is not the operation's serial cost -- deleting it lets the compiler restructure around it, which no faster kernel reproduces. The realizable figure is the doubling slope: **0.81%** (15.7 us per layer). Treat 2.96% as an upper bound that is not achievable.
+
+Mirror ratio is **0.275** against a 0.5 cutoff, so the demotion holds for any cutoff above 0.275. The cutoff was chosen after seeing the data; this ratio is what lets a reader judge how much that choice mattered.
+
+**Verdict: latency case is dead: pivot Checkpoint C to paged-cache capability**
+
 ## Launch structure (profiler)
 
 | impl | config | kernels/invocation | distinct | device us/invocation |
