@@ -226,3 +226,70 @@ def test_the_gate_reports_the_doubling_slope_when_present(tmp_path):
 def test_a_missing_amdahl_csv_leaves_the_summary_renderable(tmp_path):
     assert read_amdahl_rows(str(tmp_path / "nope.csv")) == []
     assert amdahl_gate([]) is None
+
+
+def test_a_doubling_that_mirrors_the_removal_licenses_the_bound(tmp_path):
+    path = write_amdahl(tmp_path, [
+        amdahl_row("hf_static_graph", "full", 100.0),
+        amdahl_row("hf_static_graph", "op_removed", 93.0),      # saves 7%
+        amdahl_row("hf_static_graph", "op_doubled", 106.5),     # costs 6.5% -- mirrors
+    ])
+    gate = amdahl_gate(amdahl_savings(read_amdahl_rows(path)))
+    assert gate["bound_licensed"]
+    assert gate["realizable_pct"] == pytest.approx(7.0)
+    assert "real" in gate["verdict"]
+
+
+def test_a_doubling_that_does_not_mirror_demotes_the_bound(tmp_path):
+    """The pre-registered rule: removal that is not mirrored by doubling was never on the
+    critical path, so the removal saving is an upper bound nobody can realize."""
+    path = write_amdahl(tmp_path, [
+        amdahl_row("hf_static_graph", "full", 100.0),
+        amdahl_row("hf_static_graph", "op_removed", 96.0),      # saves 4% -> would read "real"
+        amdahl_row("hf_static_graph", "op_doubled", 100.6),     # costs 0.6% -- does not mirror
+    ])
+    gate = amdahl_gate(amdahl_savings(read_amdahl_rows(path)))
+    assert not gate["bound_licensed"]
+    assert gate["saving_pct"] == pytest.approx(4.0)
+    assert gate["realizable_pct"] == pytest.approx(0.6)
+    assert "dead" in gate["verdict"]
+
+
+def test_the_gate_reports_the_mirror_ratio_it_judged_on(tmp_path):
+    """The cutoff is a number chosen after seeing the data, so the ratio it was compared against
+    has to travel with the verdict -- otherwise a reader cannot tell whether the demotion was
+    decisive or a coin flip against an arbitrary constant."""
+    path = write_amdahl(tmp_path, [
+        amdahl_row("hf_static_graph", "full", 100.0),
+        amdahl_row("hf_static_graph", "op_removed", 96.0),
+        amdahl_row("hf_static_graph", "op_doubled", 101.2),
+    ])
+    gate = amdahl_gate(amdahl_savings(read_amdahl_rows(path)))
+    assert gate["mirror_ratio"] == pytest.approx(0.3)
+    assert gate["mirror_cutoff"] == 0.5
+
+
+@pytest.mark.parametrize("cutoff", [0.35, 0.5, 0.75])
+def test_the_verdict_is_stable_across_plausible_cutoffs(tmp_path, monkeypatch, cutoff):
+    """A ratio of 0.275 -- what the probe actually measured -- must demote under every cutoff a
+    reasonable person would pick, or the verdict is an artifact of the constant."""
+    import benchmarks.summarize_results as sr
+    monkeypatch.setattr(sr, "AMDAHL_MIRROR_RATIO", cutoff)
+    path = write_amdahl(tmp_path, [
+        amdahl_row("hf_static_graph", "full", 100.0),
+        amdahl_row("hf_static_graph", "op_removed", 97.04),     # 2.96%
+        amdahl_row("hf_static_graph", "op_doubled", 100.81),    # 0.81% -> ratio 0.275
+    ])
+    gate = sr.amdahl_gate(sr.amdahl_savings(sr.read_amdahl_rows(path)))
+    assert not gate["bound_licensed"]
+    assert "dead" in gate["verdict"]
+
+
+def test_a_missing_doubling_rung_leaves_the_bound_unlicensed(tmp_path):
+    path = write_amdahl(tmp_path, [
+        amdahl_row("hf_static_graph", "full", 100.0),
+        amdahl_row("hf_static_graph", "op_removed", 96.0),
+    ])
+    gate = amdahl_gate(amdahl_savings(read_amdahl_rows(path)))
+    assert not gate["bound_licensed"]
+    assert gate["doubled_cost_pct"] is None

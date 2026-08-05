@@ -161,7 +161,12 @@ AMDAHL_GATE_MODE = "hf_static_graph"
 # b=32 configuration, which is the largest saving any fused kernel could realize.
 AMDAHL_GATE = ((5.0, "latency case is real: build the fused kernel for latency"),
                (1.0, "marginal: build it as fusion ablation + the paged path"),
-               (0.0, "latency case is dead: pivot Checkpoint C to paged-cache capability"))
+               (-1e9, "latency case is dead: pivot Checkpoint C to paged-cache capability"))
+# The plan pre-registered op_doubled as the check that licenses quoting op_removed: "if removal
+# saves X but doubling costs materially less than X, the operation is partly overlapped and
+# op_removed is an optimistic bound". Below this ratio the two do not mirror, so the realizable
+# figure is the doubling slope, not the removal saving.
+AMDAHL_MIRROR_RATIO = 0.5
 
 
 def read_amdahl_rows(path):
@@ -201,13 +206,24 @@ def amdahl_gate(savings, layers=32):
     doubled = next((s for s in savings
                     if s["mode"] == best["mode"] and s["batch"] == best["batch"]
                     and s["ctx"] == best["ctx"] and s["rung"] == "op_doubled"), None)
-    verdict = next(v for threshold, v in AMDAHL_GATE if best["saving_pct"] >= threshold)
+    doubled_pct = None if not doubled else -doubled["saving_pct"]
+    licensed = (doubled_pct is not None
+                and doubled_pct >= AMDAHL_MIRROR_RATIO * best["saving_pct"])
+    realizable = best["saving_pct"] if licensed else (doubled_pct if doubled_pct is not None
+                                                      else best["saving_pct"])
+    verdict = next(v for threshold, v in AMDAHL_GATE if realizable >= threshold)
     return {
         "gate_mode": AMDAHL_GATE_MODE, "batch": best["batch"], "ctx": best["ctx"],
         "full_ms": best["full_ms"], "saving_pct": best["saving_pct"],
         "saving_ms": best["full_ms"] - best["step_ms"],
         "per_layer_us": (best["full_ms"] - best["step_ms"]) * 1000.0 / layers,
-        "doubled_cost_pct": None if not doubled else -doubled["saving_pct"],
+        "doubled_cost_pct": doubled_pct,
+        "mirror_ratio": (None if doubled_pct is None or not best["saving_pct"]
+                         else doubled_pct / best["saving_pct"]),
+        "mirror_cutoff": AMDAHL_MIRROR_RATIO,
+        "bound_licensed": licensed,
+        "realizable_pct": realizable,
+        "realizable_per_layer_us": realizable / 100.0 * best["full_ms"] * 1000.0 / layers,
         "verdict": verdict,
     }
 
@@ -345,12 +361,25 @@ def render_markdown(s):
                 f"the most operator-favourable configuration measured. Removing the operation "
                 f"saves **{g['saving_pct']:.2f}%** of a {g['full_ms']:.2f} ms step "
                 f"({g['saving_ms']*1000:.0f} us, {g['per_layer_us']:.1f} us per layer).",
-                "",
-                f"Validity check -- doubling the operation costs {doubled}. If that does not "
-                "roughly mirror the removal, the operation is partly overlapped and the bound "
-                "is optimistic.",
-                "",
-                f"**Verdict: {g['verdict']}**"]
+                ""]
+        if g["bound_licensed"]:
+            out += [f"Validity check passes: doubling the operation costs {doubled}, which "
+                    "mirrors the removal, so the operation is serially on the critical path and "
+                    "the removal saving is realizable."]
+        else:
+            out += [f"**Validity check FAILS: doubling the operation costs only {doubled}** "
+                    f"against a {g['saving_pct']:.2f}% removal saving. The two do not mirror, so "
+                    "most of what removal buys is not the operation's serial cost -- deleting it "
+                    "lets the compiler restructure around it, which no faster kernel reproduces. "
+                    f"The realizable figure is the doubling slope: **{g['realizable_pct']:.2f}%** "
+                    f"({g['realizable_per_layer_us']:.1f} us per layer). Treat "
+                    f"{g['saving_pct']:.2f}% as an upper bound that is not achievable.",
+                    "",
+                    f"Mirror ratio is **{g['mirror_ratio']:.3f}** against a {g['mirror_cutoff']} "
+                    f"cutoff, so the demotion holds for any cutoff above "
+                    f"{g['mirror_ratio']:.3f}. The cutoff was chosen after seeing the data; this "
+                    "ratio is what lets a reader judge how much that choice mattered."]
+        out += ["", f"**Verdict: {g['verdict']}**"]
 
     if s["launch_structure"]:
         out += ["", "## Launch structure (profiler)", ""]

@@ -65,22 +65,28 @@ def _cudagraph_manager_exists():
         return False
 
 
-def measure(model, cfg, mode, rung, args, device="cuda"):
-    headroom = 2 * (args.warmup + args.iters) + 8
-    max_cache_len = cfg.ctx + headroom
-    _reset_compile_counters()
-    cache = dl.build_cache(model, cfg, max_cache_len, device)
-    dl.prefill(model, cache, cfg, device)
-    dl.assert_static_addresses(cache)
+def headroom_slots(args):
+    """op_doubled advances the cache counter twice per step. Sized uniformly across rungs so
+    every rung allocates the same cache and attention reads the same length."""
+    return 2 * (args.warmup + args.iters) + 8
 
+
+def measure(model, cfg, mode, rung, args, device="cuda"):
+    max_cache_len = cfg.ctx + headroom_slots(args)
     row = {
         **cfg.as_row(), "mode": mode, "rung": rung.label,
         "description": rung.description,
         "numerically_valid": rung.numerically_valid,
         "layer_types_forced": True,
         "max_cache_len": max_cache_len,
+        "amortized_step_ms": "", "synchronized_step_ms": "", "error": "",
     }
+    cache = None
     try:
+        _reset_compile_counters()
+        cache = dl.build_cache(model, cfg, max_cache_len, device)
+        dl.prefill(model, cache, cfg, device)
+        dl.assert_static_addresses(cache)
         with apply_rung(rung.label):
             callable_ = dl.build_callable(model, mode)
             step = dl.make_step(callable_, cache, cfg, cfg.ctx, device)
@@ -109,11 +115,16 @@ def measure(model, cfg, mode, rung, args, device="cuda"):
                 "error": "",
             })
     except Exception as e:
+        detail = " ".join(str(e).split())[:200]
         row.update({"amortized_step_ms": "", "synchronized_step_ms": "",
-                    "error": f"{type(e).__name__}: {e}"})
-        print(f"    ERROR {type(e).__name__}: {e}", flush=True)
+                    "error": f"{type(e).__name__}: {detail}"})
+        print(f"    ERROR {type(e).__name__}: {detail}", flush=True)
     dl.release(cache)
     return row
+
+
+def _write(args, rows):
+    write_csv(args.out, rows)
 
 
 def main():
@@ -125,6 +136,10 @@ def main():
     ap.add_argument("--rungs", nargs="+", default=[r.label for r in RUNGS])
     ap.add_argument("--batches", type=int, nargs="+", default=None)
     ap.add_argument("--ctxs", type=int, nargs="+", default=None)
+    # Calibrated against the observed OOM: b=32 ctx=1024 had 20.10 GB allocated and 23.17 GB in
+    # use when it died, so workspace + fragmentation is ~3.0 GB on top of weights + KV.
+    ap.add_argument("--mem-budget-gb", type=float, default=22.5)
+    ap.add_argument("--activation-reserve-gb", type=float, default=3.0)
     ap.add_argument("--out", default=os.path.join(REPO_ROOT, "results/raw/amdahl_probe.csv"))
     args = ap.parse_args()
 
@@ -145,9 +160,25 @@ def main():
     print(f"  {text.num_hidden_layers} layers, sliding_window={text.sliding_window}, "
           f"weights {torch.cuda.memory_allocated()/1e9:.1f} GB", flush=True)
 
+    weights_gb = torch.cuda.memory_allocated() / 1e9
     rows = []
     for cfg in configs:
         print(f"\n=== {cfg.label()}", flush=True)
+        max_cache_len = cfg.ctx + headroom_slots(args)
+        kv_gb = dl.footprint_bytes(model.config, cfg, max_cache_len) / 1e9
+        need = weights_gb + kv_gb + args.activation_reserve_gb
+        if need > args.mem_budget_gb:
+            reason = (f"weights {weights_gb:.1f} + KV {kv_gb:.1f} + reserve "
+                      f"{args.activation_reserve_gb:.1f} = {need:.1f} GB > "
+                      f"{args.mem_budget_gb:.1f} GB budget")
+            print(f"  SKIPPED: {reason}", flush=True)
+            rows.append({**cfg.as_row(), "mode": "", "rung": "skipped",
+                         "description": "not run", "numerically_valid": False,
+                         "layer_types_forced": True, "max_cache_len": max_cache_len,
+                         "amortized_step_ms": "", "synchronized_step_ms": "",
+                         "error": reason})
+            _write(args, rows)
+            continue
         for mode in args.modes:
             baseline = None
             for rung in rungs:
@@ -163,6 +194,8 @@ def main():
                     "" if not baseline else (baseline - ms) / baseline * 100)
                 row["per_layer_us"] = ms * 1000.0 / text.num_hidden_layers
                 print(f"  {mode:16s} {rung.label:16s} {ms:8.3f} ms/step  {saving}", flush=True)
+        # written per config: a crash in a later config must not cost the earlier ones
+        _write(args, rows)
 
     meta = env_metadata(0, cli_args=vars(args), extra={
         "model_id": args.model,

@@ -62,6 +62,12 @@ def kv_bytes_per_token(config, dtype):
     return 2 * text.num_key_value_heads * head_dim * elem * text.num_hidden_layers
 
 
+def footprint_bytes(config, cfg, max_cache_len):
+    """Weights already resident plus the KV this config would allocate. Excludes activations
+    and inductor workspace, which is what `activation_reserve_gb` covers at the call site."""
+    return cfg.batch * max_cache_len * kv_bytes_per_token(config, cfg.dtype)
+
+
 def build_cache(model, cfg, max_cache_len, device="cuda"):
     cache = StaticCache(config=model.config, max_cache_len=max_cache_len)
     assert_non_sliding(cache)

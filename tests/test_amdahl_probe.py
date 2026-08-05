@@ -232,3 +232,43 @@ def test_only_full_and_the_ref_replacement_are_numerically_valid():
 def test_resolve_rungs_rejects_unknown_labels():
     with pytest.raises(ValueError, match="unknown rung"):
         resolve_rungs(["full", "not_a_rung"])
+
+
+# --- the footprint guard and crash safety ----------------------------------------------------
+
+from benchmarks.decode_loop import footprint_bytes, kv_bytes_per_token  # noqa: E402
+from benchmarks.probe_amdahl import headroom_slots  # noqa: E402
+
+
+class _Args:
+    warmup, iters = 20, 150
+
+
+def test_kv_bytes_per_token_matches_the_hand_computation():
+    """2 (K+V) x kv_heads x head_dim x elem x layers. Mistral-7B: 2*8*128*2*32 = 128 KiB."""
+    cfg = tiny_config(sliding_window=None)
+    cfg.num_key_value_heads, cfg.head_dim, cfg.num_hidden_layers = 8, 128, 32
+    assert kv_bytes_per_token(cfg, torch.bfloat16) == 2 * 8 * 128 * 2 * 32
+
+
+def test_headroom_covers_the_doubling_rung():
+    """op_doubled advances two slots per step, so headroom must be 2x the step count or the
+    run overruns the cache mid-measurement."""
+    a = _Args()
+    assert headroom_slots(a) >= 2 * (a.warmup + a.iters)
+
+
+def test_the_guard_denies_the_config_that_actually_oomed():
+    """b=32 ctx=1024 died with 20.10 GB allocated of a 23.42 GB card. It must be skipped, not
+    retried -- and b=32 ctx=512, which ran, must not be."""
+    cfg = tiny_config(sliding_window=None)
+    cfg.num_key_value_heads, cfg.head_dim, cfg.num_hidden_layers = 8, 128, 32
+    weights_gb, reserve, budget = 14.5, 3.0, 22.5
+
+    def need(ctx):
+        dc = dl.DecodeConfig("m", 32, ctx, "bf16")
+        kv = footprint_bytes(cfg, dc, ctx + headroom_slots(_Args())) / 1e9
+        return weights_gb + kv + reserve
+
+    assert need(1024) > budget
+    assert need(512) <= budget
