@@ -133,3 +133,96 @@ def test_markdown_renders_without_a_profile_summary(tmp_path):
     text = render_markdown(build_summary(path, {}, None))
     assert "Speedup vs eager" in text
     assert "Launch structure" not in text
+
+
+# --- amdahl probe derivation ------------------------------------------------------------
+
+from benchmarks.summarize_results import (  # noqa: E402
+    amdahl_gate,
+    amdahl_savings,
+    read_amdahl_rows,
+)
+
+AMDAHL_COLUMNS = ["model_id", "batch", "ctx", "dtype_label", "mode", "rung", "description",
+                  "numerically_valid", "amortized_step_ms"]
+
+
+def amdahl_row(mode, rung, ms, *, batch=32, ctx=128, valid=False):
+    return {"model_id": "m", "batch": str(batch), "ctx": str(ctx), "dtype_label": "bf16",
+            "mode": mode, "rung": rung, "description": rung,
+            "numerically_valid": str(valid), "amortized_step_ms": str(ms)}
+
+
+def write_amdahl(tmp_path, rows):
+    path = tmp_path / "amdahl.csv"
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=AMDAHL_COLUMNS)
+        w.writeheader()
+        w.writerows(rows)
+    return str(path)
+
+
+def test_savings_are_relative_to_the_full_rung_of_the_same_mode(tmp_path):
+    path = write_amdahl(tmp_path, [
+        amdahl_row("hf_eager", "full", 100.0), amdahl_row("hf_eager", "op_removed", 90.0),
+        amdahl_row("hf_static_graph", "full", 50.0),
+        amdahl_row("hf_static_graph", "op_removed", 49.0),
+    ])
+    got = {(s["mode"], s["rung"]): s["saving_pct"] for s in amdahl_savings(read_amdahl_rows(path))}
+    assert got[("hf_eager", "op_removed")] == pytest.approx(10.0)
+    assert got[("hf_static_graph", "op_removed")] == pytest.approx(2.0)
+
+
+def test_rows_without_a_timing_are_dropped_not_counted_as_zero(tmp_path):
+    path = write_amdahl(tmp_path, [amdahl_row("hf_eager", "full", 100.0),
+                                   amdahl_row("hf_eager", "op_removed", "")])
+    assert [s["rung"] for s in amdahl_savings(read_amdahl_rows(path))] == ["full"]
+
+
+def test_the_gate_reads_the_static_graph_mode_not_eager(tmp_path):
+    """Eager flatters the operator. Gating on it would be the careless reading the plan
+    pre-registered against."""
+    path = write_amdahl(tmp_path, [
+        amdahl_row("hf_eager", "full", 100.0), amdahl_row("hf_eager", "op_removed", 80.0),
+        amdahl_row("hf_static_graph", "full", 50.0),
+        amdahl_row("hf_static_graph", "op_removed", 49.75),
+    ])
+    gate = amdahl_gate(amdahl_savings(read_amdahl_rows(path)))
+    assert gate["gate_mode"] == "hf_static_graph"
+    assert gate["saving_pct"] == pytest.approx(0.5)
+    assert "dead" in gate["verdict"]
+
+
+def test_the_gate_picks_the_most_favourable_batch32_config(tmp_path):
+    path = write_amdahl(tmp_path, [
+        amdahl_row("hf_static_graph", "full", 50.0, ctx=128),
+        amdahl_row("hf_static_graph", "op_removed", 49.0, ctx=128),
+        amdahl_row("hf_static_graph", "full", 80.0, ctx=1024),
+        amdahl_row("hf_static_graph", "op_removed", 79.9, ctx=1024),
+    ])
+    gate = amdahl_gate(amdahl_savings(read_amdahl_rows(path)))
+    assert gate["ctx"] == 128
+
+
+@pytest.mark.parametrize("saving_ms,expected", [(0.4, "dead"), (2.0, "marginal"), (4.0, "real")])
+def test_each_preregistered_band_is_reachable(tmp_path, saving_ms, expected):
+    path = write_amdahl(tmp_path, [
+        amdahl_row("hf_static_graph", "full", 50.0),
+        amdahl_row("hf_static_graph", "op_removed", 50.0 - saving_ms),
+    ])
+    assert expected in amdahl_gate(amdahl_savings(read_amdahl_rows(path)))["verdict"]
+
+
+def test_the_gate_reports_the_doubling_slope_when_present(tmp_path):
+    path = write_amdahl(tmp_path, [
+        amdahl_row("hf_static_graph", "full", 50.0),
+        amdahl_row("hf_static_graph", "op_removed", 49.0),
+        amdahl_row("hf_static_graph", "op_doubled", 51.0),
+    ])
+    gate = amdahl_gate(amdahl_savings(read_amdahl_rows(path)))
+    assert gate["doubled_cost_pct"] == pytest.approx(2.0)
+
+
+def test_a_missing_amdahl_csv_leaves_the_summary_renderable(tmp_path):
+    assert read_amdahl_rows(str(tmp_path / "nope.csv")) == []
+    assert amdahl_gate([]) is None
