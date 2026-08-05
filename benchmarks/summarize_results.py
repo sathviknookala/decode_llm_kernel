@@ -156,6 +156,62 @@ def bandwidth_column_sanity(rows):
             "scattered": top("pct_of_scattered_write_bw")}
 
 
+AMDAHL_GATE_MODE = "hf_static_graph"
+# Pre-registered before the run. Applied to the op_removed saving at the most operator-favourable
+# b=32 configuration, which is the largest saving any fused kernel could realize.
+AMDAHL_GATE = ((5.0, "latency case is real: build the fused kernel for latency"),
+               (1.0, "marginal: build it as fusion ablation + the paged path"),
+               (0.0, "latency case is dead: pivot Checkpoint C to paged-cache capability"))
+
+
+def read_amdahl_rows(path):
+    if not path or not os.path.exists(path):
+        return []
+    with open(path, newline="") as f:
+        return [r for r in csv.DictReader(f) if r.get("amortized_step_ms")]
+
+
+def amdahl_savings(rows):
+    """Saving vs the `full` rung at each (config, mode), from amortized step time."""
+    full = {(r["batch"], r["ctx"], r["mode"]): float(r["amortized_step_ms"])
+            for r in rows if r["rung"] == "full"}
+    out = []
+    for r in rows:
+        base = full.get((r["batch"], r["ctx"], r["mode"]))
+        if not base:
+            continue
+        ms = float(r["amortized_step_ms"])
+        out.append({
+            "batch": int(r["batch"]), "ctx": int(r["ctx"]), "mode": r["mode"],
+            "rung": r["rung"], "step_ms": ms, "full_ms": base,
+            "saving_pct": (base - ms) / base * 100.0,
+            "numerically_valid": r.get("numerically_valid") == "True",
+        })
+    return out
+
+
+def amdahl_gate(savings, layers=32):
+    """The pre-registered verdict, derived rather than asserted."""
+    candidates = [s for s in savings
+                  if s["mode"] == AMDAHL_GATE_MODE and s["rung"] == "op_removed"
+                  and s["batch"] == 32]
+    if not candidates:
+        return None
+    best = max(candidates, key=lambda s: s["saving_pct"])
+    doubled = next((s for s in savings
+                    if s["mode"] == best["mode"] and s["batch"] == best["batch"]
+                    and s["ctx"] == best["ctx"] and s["rung"] == "op_doubled"), None)
+    verdict = next(v for threshold, v in AMDAHL_GATE if best["saving_pct"] >= threshold)
+    return {
+        "gate_mode": AMDAHL_GATE_MODE, "batch": best["batch"], "ctx": best["ctx"],
+        "full_ms": best["full_ms"], "saving_pct": best["saving_pct"],
+        "saving_ms": best["full_ms"] - best["step_ms"],
+        "per_layer_us": (best["full_ms"] - best["step_ms"]) * 1000.0 / layers,
+        "doubled_cost_pct": None if not doubled else -doubled["saving_pct"],
+        "verdict": verdict,
+    }
+
+
 def launch_structure(profile_summary):
     if not profile_summary:
         return []
@@ -166,10 +222,14 @@ def launch_structure(profile_summary):
             for s in profile_summary.get("summaries", [])]
 
 
-def build_summary(csv_path, env, profile_summary):
+def build_summary(csv_path, env, profile_summary, amdahl_csv=None):
     rows = read_rows(csv_path)
     heads, head_ctx = head_dim_response(rows)
+    amdahl = amdahl_savings(read_amdahl_rows(amdahl_csv))
     return {
+        "amdahl": {"savings": amdahl, "gate": amdahl_gate(amdahl),
+                   "source_csv": (os.path.relpath(amdahl_csv, REPO_ROOT)
+                                  if amdahl_csv and os.path.exists(amdahl_csv) else None)},
         "source_csv": os.path.relpath(csv_path, REPO_ROOT),
         "rows_timed": len(rows),
         "environment": {k: env.get(k) for k in
@@ -263,6 +323,35 @@ def render_markdown(s):
                   [[r["layout"], r["request_mapping"], r["impl"],
                     f"{r['median_ratio']:.3f}", r["n"]] for r in s["serving_layout"]])
 
+    am = s.get("amdahl", {})
+    if am.get("gate"):
+        g = am["gate"]
+        out += ["", "## Amdahl fraction: what a fused kernel can win end to end", "",
+                f"Source: `{am['source_csv']}`. Substitution ablation on a real decode loop -- "
+                "`op_removed` deletes RoPE and the cache write (and their launches), so its "
+                "saving is the upper bound on a fused kernel.", ""]
+        by_mode = {}
+        for r in am["savings"]:
+            if r["rung"] == "op_removed":
+                by_mode.setdefault(r["mode"], []).append(r)
+        out += _table(["mode", "batch", "ctx", "full ms/step", "op_removed saving"],
+                      [[r["mode"], r["batch"], r["ctx"], f"{r['full_ms']:.3f}",
+                        f"{r['saving_pct']:+.2f}%"]
+                       for m in by_mode for r in sorted(by_mode[m], key=lambda x: (x["batch"], x["ctx"]))])
+        doubled = ("not measured" if g["doubled_cost_pct"] is None
+                   else f"{g['doubled_cost_pct']:+.2f}%")
+        out += ["",
+                f"**Gate** (pre-registered): `{g['gate_mode']}`, b={g['batch']}, ctx={g['ctx']} -- "
+                f"the most operator-favourable configuration measured. Removing the operation "
+                f"saves **{g['saving_pct']:.2f}%** of a {g['full_ms']:.2f} ms step "
+                f"({g['saving_ms']*1000:.0f} us, {g['per_layer_us']:.1f} us per layer).",
+                "",
+                f"Validity check -- doubling the operation costs {doubled}. If that does not "
+                "roughly mirror the removal, the operation is partly overlapped and the bound "
+                "is optimistic.",
+                "",
+                f"**Verdict: {g['verdict']}**"]
+
     if s["launch_structure"]:
         out += ["", "## Launch structure (profiler)", ""]
         out += _table(["impl", "config", "kernels/invocation", "distinct", "device us/invocation"],
@@ -286,6 +375,8 @@ def main():
     ap.add_argument("--env", default=None, help="defaults to the CSV's adjacent .env.json")
     ap.add_argument("--profile-summary",
                     default=os.path.join(REPO_ROOT, "results/profiling/profile_summary.json"))
+    ap.add_argument("--amdahl-csv",
+                    default=os.path.join(REPO_ROOT, "results/raw/amdahl_probe.csv"))
     ap.add_argument("--out", default=os.path.join(REPO_ROOT, "results/summary.md"))
     ap.add_argument("--json-out", default=None)
     args = ap.parse_args()
@@ -293,7 +384,7 @@ def main():
     env_path = args.env or (os.path.splitext(args.csv)[0] + ".env.json")
     env_doc = _load_json(env_path) or {}
     summary = build_summary(args.csv, env_doc.get("environment", {}),
-                            _load_json(args.profile_summary))
+                            _load_json(args.profile_summary), args.amdahl_csv)
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     with open(args.out, "w") as f:
