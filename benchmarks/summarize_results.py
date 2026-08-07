@@ -211,6 +211,48 @@ def amdahl_savings(rows):
     return out
 
 
+def amdahl_mirror_table(savings):
+    """Removal against doubling at every (mode, config).
+
+    The eager rows are the positive control: if op_doubled never registered anywhere, a ratio
+    near zero under compile would be an insensitive instrument rather than a finding.
+    """
+    by = {}
+    for s in savings:
+        if s["rung"] in ("op_removed", "op_doubled", "rope_removed", "append_removed"):
+            by.setdefault((s["mode"], s["batch"], s["ctx"]), {})[s["rung"]] = s
+    out = []
+    for (mode, batch, ctx), r in sorted(by.items(), key=lambda kv: (kv[0][0], -kv[0][1], kv[0][2])):
+        if "op_removed" not in r or "op_doubled" not in r:
+            continue
+        removal = r["op_removed"]["saving_pct"]
+        doubling = -r["op_doubled"]["saving_pct"]
+        out.append({
+            "mode": mode, "batch": batch, "ctx": ctx,
+            "full_ms": r["op_removed"]["full_ms"],
+            "removal_pct": removal, "doubling_pct": doubling,
+            "rope_pct": r["rope_removed"]["saving_pct"] if "rope_removed" in r else None,
+            "append_pct": r["append_removed"]["saving_pct"] if "append_removed" in r else None,
+            "mirror_ratio": doubling / removal if removal else None,
+            "noise_pct": r["op_removed"].get("noise_pct"),
+        })
+    return out
+
+
+def amdahl_control_check(mirror_rows):
+    """Did op_doubled ever register? Eager is where it must."""
+    eager = [r["mirror_ratio"] for r in mirror_rows
+             if r["mode"] == "hf_eager" and r["mirror_ratio"] is not None]
+    compiled = [r["mirror_ratio"] for r in mirror_rows
+                if r["mode"] != "hf_eager" and r["mirror_ratio"] is not None]
+    if not eager or not compiled:
+        return None
+    return {"eager_min": min(eager), "eager_max": max(eager), "eager_n": len(eager),
+            "compiled_min": min(compiled), "compiled_max": max(compiled),
+            "compiled_n": len(compiled),
+            "control_holds": min(eager) >= AMDAHL_MIRROR_RATIO}
+
+
 def amdahl_gate(savings, layers=32):
     """The pre-registered verdict, derived rather than asserted."""
     candidates = [s for s in savings
@@ -261,8 +303,10 @@ def build_summary(csv_path, env, profile_summary, amdahl_csv=None):
     rows = read_rows(csv_path)
     heads, head_ctx = head_dim_response(rows)
     amdahl = amdahl_savings(read_amdahl_rows(amdahl_csv))
+    mirror = amdahl_mirror_table(amdahl)
     return {
         "amdahl": {"savings": amdahl, "gate": amdahl_gate(amdahl),
+                   "mirror": mirror, "control": amdahl_control_check(mirror),
                    "source_csv": (os.path.relpath(amdahl_csv, REPO_ROOT)
                                   if amdahl_csv and os.path.exists(amdahl_csv) else None)},
         "source_csv": os.path.relpath(csv_path, REPO_ROOT),
@@ -412,6 +456,31 @@ def render_markdown(s):
                         "about the noise floor, which is already well inside the dead band. A "
                         "tighter number would need a lower-variance rig, not a different verdict."]
         out += ["", f"**Verdict: {g['verdict']}**"]
+
+        if am.get("mirror"):
+            out += ["", "### Removal against doubling, every mode and configuration", "",
+                    "A removal that a doubling does not mirror was not on the critical path. "
+                    "`rope` and `append` split the removal between the two halves.", ""]
+            out += _table(["mode", "b", "ctx", "full ms", "removal", "doubling", "rope",
+                           "append", "ratio"],
+                          [[r["mode"], r["batch"], r["ctx"], f"{r['full_ms']:.2f}",
+                            f"{r['removal_pct']:+.2f}%", f"{r['doubling_pct']:+.2f}%",
+                            "n/a" if r["rope_pct"] is None else f"{r['rope_pct']:+.2f}%",
+                            "n/a" if r["append_pct"] is None else f"{r['append_pct']:+.2f}%",
+                            "n/a" if r["mirror_ratio"] is None else f"{r['mirror_ratio']:.3f}"]
+                           for r in am["mirror"]])
+        c = am.get("control")
+        if c:
+            verdict = ("**holds**" if c["control_holds"]
+                       else "**DOES NOT HOLD -- treat the demotion as unsupported**")
+            out += ["", "### Positive control", "",
+                    f"Eager mirror ratio spans {c['eager_min']:.2f}-{c['eager_max']:.2f} over "
+                    f"{c['eager_n']} configurations; compiled spans "
+                    f"{c['compiled_min']:.3f}-{c['compiled_max']:.3f} over {c['compiled_n']}. "
+                    f"The control {verdict}: `op_doubled` does register serial work where the "
+                    "operation is serial, so a near-zero ratio under compile is a property of "
+                    "the workload rather than an insensitive instrument. Without these eager "
+                    "rows the demotion would rest on a null result."]
 
     if s["launch_structure"]:
         out += ["", "## Launch structure (profiler)", ""]

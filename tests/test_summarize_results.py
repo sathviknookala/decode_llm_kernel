@@ -348,3 +348,64 @@ def test_the_gate_carries_whether_its_two_inputs_were_resolved(tmp_path):
     assert g["removal_resolved"] is True
     assert g["doubling_resolved"] is False
     assert "dead" in g["verdict"]
+
+
+# --- the positive control -----------------------------------------------------------------
+
+from benchmarks.summarize_results import (  # noqa: E402
+    amdahl_control_check,
+    amdahl_mirror_table,
+)
+
+
+def _both_modes(tmp_path, eager_double, compiled_double):
+    return write_amdahl(tmp_path, [
+        amdahl_row("hf_eager", "full", 100.0),
+        amdahl_row("hf_eager", "op_removed", 97.0),
+        amdahl_row("hf_eager", "op_doubled", 100.0 + eager_double),
+        amdahl_row("hf_eager", "rope_removed", 99.5),
+        amdahl_row("hf_eager", "append_removed", 97.5),
+        amdahl_row("hf_static_graph", "full", 100.0),
+        amdahl_row("hf_static_graph", "op_removed", 97.0),
+        amdahl_row("hf_static_graph", "op_doubled", 100.0 + compiled_double),
+    ])
+
+
+def test_the_control_holds_when_eager_mirrors_and_compiled_does_not(tmp_path):
+    path = _both_modes(tmp_path, eager_double=3.0, compiled_double=0.3)
+    c = amdahl_control_check(amdahl_mirror_table(amdahl_savings(read_amdahl_rows(path))))
+    assert c["control_holds"] is True
+    assert c["eager_min"] == pytest.approx(1.0, abs=0.05)
+    assert c["compiled_max"] == pytest.approx(0.1, abs=0.02)
+
+
+def test_the_control_fails_when_doubling_registers_nowhere(tmp_path):
+    """If op_doubled were simply insensitive it would read ~0 in eager too, and then a near-zero
+    compiled ratio would prove nothing. That case has to be detectable."""
+    path = _both_modes(tmp_path, eager_double=0.05, compiled_double=0.3)
+    c = amdahl_control_check(amdahl_mirror_table(amdahl_savings(read_amdahl_rows(path))))
+    assert c["control_holds"] is False
+
+
+def test_the_mirror_table_splits_rope_from_append(tmp_path):
+    path = _both_modes(tmp_path, 3.0, 0.3)
+    rows = {r["mode"]: r for r in amdahl_mirror_table(amdahl_savings(read_amdahl_rows(path)))}
+    assert rows["hf_eager"]["rope_pct"] == pytest.approx(0.5)
+    assert rows["hf_eager"]["append_pct"] == pytest.approx(2.5)
+    assert rows["hf_static_graph"]["rope_pct"] is None      # not measured in this fixture
+
+
+def test_the_control_is_absent_rather_than_wrong_with_one_mode(tmp_path):
+    path = write_amdahl(tmp_path, [
+        amdahl_row("hf_static_graph", "full", 100.0),
+        amdahl_row("hf_static_graph", "op_removed", 97.0),
+        amdahl_row("hf_static_graph", "op_doubled", 100.3),
+    ])
+    assert amdahl_control_check(amdahl_mirror_table(amdahl_savings(read_amdahl_rows(path)))) is None
+
+
+def test_the_control_paragraph_reaches_the_markdown(tmp_path):
+    base = write_csv(tmp_path, [row("eager", 1.0), row("compile", 0.5)])
+    text = render_markdown(build_summary(base, {}, None, _both_modes(tmp_path, 3.0, 0.3)))
+    assert "Positive control" in text
+    assert "holds" in text
