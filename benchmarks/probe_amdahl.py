@@ -200,12 +200,13 @@ def main():
     meta = env_metadata(0, cli_args=vars(args), extra={
         "model_id": args.model,
         "sliding_window_disabled": True,
-        "rungs": [{"rung": r.label, "description": r.description,
-                   "numerically_valid": r.numerically_valid} for r in RUNGS],
     })
     record_gpu_state_end(meta, 0)
     write_csv(args.out, rows)
-    write_json(os.path.splitext(args.out)[0] + ".env.json", meta)
+    write_json(os.path.splitext(args.out)[0] + ".env.json",
+               {"environment": meta,
+                "rungs": [{"rung": r.label, "description": r.description,
+                           "numerically_valid": r.numerically_valid} for r in RUNGS]})
     print(f"\nwrote {args.out}")
 
 

@@ -317,6 +317,22 @@ def write_csv(path, rows):
         w.writerows(rows)
 
 
+def read_env_doc(path):
+    """The environment block from a probe's .env.json, tolerant of both shapes.
+
+    Probes write `{"environment": {...}, ...}`; `amdahl_probe.env.json` as committed is flat,
+    because the code was left as it ran rather than edited after the measurement. Detect by
+    looking for a key only the metadata carries.
+    """
+    if not path or not os.path.exists(path):
+        return {}
+    with open(path) as f:
+        doc = json.load(f)
+    if "environment" in doc:
+        return doc["environment"]
+    return doc if "timestamp_utc" in doc else {}
+
+
 def write_json(path, obj):
     dirname = os.path.dirname(path)
     if dirname:

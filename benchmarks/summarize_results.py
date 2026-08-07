@@ -7,7 +7,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from benchmarks.benchmark_utils import REPO_ROOT
+from benchmarks.benchmark_utils import REPO_ROOT, read_env_doc
 
 MAIN_LAYOUT = ("packed", "identity")
 GRAPH_PAIRS = (("eager", "graph_eager"), ("compile", "graph_compile"))
@@ -411,8 +411,7 @@ def main():
     args = ap.parse_args()
 
     env_path = args.env or (os.path.splitext(args.csv)[0] + ".env.json")
-    env_doc = _load_json(env_path) or {}
-    summary = build_summary(args.csv, env_doc.get("environment", {}),
+    summary = build_summary(args.csv, read_env_doc(env_path),
                             _load_json(args.profile_summary), args.amdahl_csv)
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
