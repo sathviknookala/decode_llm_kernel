@@ -144,13 +144,14 @@ from benchmarks.summarize_results import (  # noqa: E402
 )
 
 AMDAHL_COLUMNS = ["model_id", "batch", "ctx", "dtype_label", "mode", "rung", "description",
-                  "numerically_valid", "amortized_step_ms"]
+                  "numerically_valid", "amortized_step_ms", "amortized_spread_pct"]
 
 
-def amdahl_row(mode, rung, ms, *, batch=32, ctx=128, valid=False):
+def amdahl_row(mode, rung, ms, *, batch=32, ctx=128, valid=False, spread=""):
     return {"model_id": "m", "batch": str(batch), "ctx": str(ctx), "dtype_label": "bf16",
             "mode": mode, "rung": rung, "description": rung,
-            "numerically_valid": str(valid), "amortized_step_ms": str(ms)}
+            "numerically_valid": str(valid), "amortized_step_ms": str(ms),
+            "amortized_spread_pct": str(spread)}
 
 
 def write_amdahl(tmp_path, rows):
@@ -293,3 +294,57 @@ def test_a_missing_doubling_rung_leaves_the_bound_unlicensed(tmp_path):
     gate = amdahl_gate(amdahl_savings(read_amdahl_rows(path)))
     assert not gate["bound_licensed"]
     assert gate["doubled_cost_pct"] is None
+
+
+def test_a_saving_larger_than_the_spread_is_resolved(tmp_path):
+    path = write_amdahl(tmp_path, [
+        amdahl_row("hf_static_graph", "full", 100.0, spread=0.4),
+        amdahl_row("hf_static_graph", "op_removed", 97.0, spread=0.3),
+    ])
+    s = {r["rung"]: r for r in amdahl_savings(read_amdahl_rows(path))}
+    assert s["op_removed"]["noise_pct"] == pytest.approx(0.4)
+    assert s["op_removed"]["resolved"] is True
+
+
+def test_a_saving_smaller_than_the_spread_is_not_resolved(tmp_path):
+    """0.81% against a 0.4-1.0% spread is the actual situation at the gate, and reporting it as
+    a clean number would overclaim what this rig can see."""
+    path = write_amdahl(tmp_path, [
+        amdahl_row("hf_static_graph", "full", 100.0, spread=1.0),
+        amdahl_row("hf_static_graph", "op_doubled", 100.8, spread=0.5),
+    ])
+    s = {r["rung"]: r for r in amdahl_savings(read_amdahl_rows(path))}
+    assert s["op_doubled"]["resolved"] is False
+
+
+def test_noise_takes_the_larger_of_the_two_spreads(tmp_path):
+    """The delta is between two timings, so the noisier of the pair bounds it."""
+    path = write_amdahl(tmp_path, [
+        amdahl_row("hf_static_graph", "full", 100.0, spread=0.2),
+        amdahl_row("hf_static_graph", "op_removed", 97.0, spread=0.9),
+    ])
+    s = {r["rung"]: r for r in amdahl_savings(read_amdahl_rows(path))}
+    assert s["op_removed"]["noise_pct"] == pytest.approx(0.9)
+
+
+def test_a_csv_without_spread_columns_still_summarises(tmp_path):
+    """The committed single-shot CSV predates --repeats; it must not crash the summariser."""
+    path = write_amdahl(tmp_path, [
+        amdahl_row("hf_static_graph", "full", 100.0),
+        amdahl_row("hf_static_graph", "op_removed", 97.0),
+    ])
+    s = {r["rung"]: r for r in amdahl_savings(read_amdahl_rows(path))}
+    assert s["op_removed"]["noise_pct"] is None
+    assert s["op_removed"]["resolved"] is None
+
+
+def test_the_gate_carries_whether_its_two_inputs_were_resolved(tmp_path):
+    path = write_amdahl(tmp_path, [
+        amdahl_row("hf_static_graph", "full", 100.0, spread=0.5),
+        amdahl_row("hf_static_graph", "op_removed", 97.0, spread=0.5),
+        amdahl_row("hf_static_graph", "op_doubled", 100.3, spread=0.5),
+    ])
+    g = amdahl_gate(amdahl_savings(read_amdahl_rows(path)))
+    assert g["removal_resolved"] is True
+    assert g["doubling_resolved"] is False
+    assert "dead" in g["verdict"]

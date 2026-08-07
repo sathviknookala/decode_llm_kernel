@@ -176,20 +176,36 @@ def read_amdahl_rows(path):
         return [r for r in csv.DictReader(f) if r.get("amortized_step_ms")]
 
 
+def _spread_pct(row):
+    v = row.get("amortized_spread_pct")
+    return float(v) if v not in (None, "") else None
+
+
 def amdahl_savings(rows):
-    """Saving vs the `full` rung at each (config, mode), from amortized step time."""
-    full = {(r["batch"], r["ctx"], r["mode"]): float(r["amortized_step_ms"])
-            for r in rows if r["rung"] == "full"}
+    """Saving vs the `full` rung at each (config, mode), from amortized step time.
+
+    `noise_pct` is the observed spread of repeated timings at that (config, mode) -- the larger
+    of the rung's own spread and `full`'s. A saving smaller than that is not resolved by this
+    instrument and is reported as such rather than as a small number.
+    """
+    key = lambda r: (r["batch"], r["ctx"], r["mode"])  # noqa: E731
+    full = {key(r): r for r in rows if r["rung"] == "full"}
     out = []
     for r in rows:
-        base = full.get((r["batch"], r["ctx"], r["mode"]))
-        if not base:
+        base_row = full.get(key(r))
+        if not base_row:
             continue
+        base = float(base_row["amortized_step_ms"])
         ms = float(r["amortized_step_ms"])
+        spreads = [s for s in (_spread_pct(r), _spread_pct(base_row)) if s is not None]
+        noise = max(spreads) if spreads else None
+        saving = (base - ms) / base * 100.0
         out.append({
             "batch": int(r["batch"]), "ctx": int(r["ctx"]), "mode": r["mode"],
             "rung": r["rung"], "step_ms": ms, "full_ms": base,
-            "saving_pct": (base - ms) / base * 100.0,
+            "saving_pct": saving,
+            "noise_pct": noise,
+            "resolved": None if noise is None else abs(saving) > noise,
             "numerically_valid": r.get("numerically_valid") == "True",
         })
     return out
@@ -221,6 +237,9 @@ def amdahl_gate(savings, layers=32):
         "mirror_ratio": (None if doubled_pct is None or not best["saving_pct"]
                          else doubled_pct / best["saving_pct"]),
         "mirror_cutoff": AMDAHL_MIRROR_RATIO,
+        "noise_pct": best.get("noise_pct"),
+        "removal_resolved": best.get("resolved"),
+        "doubling_resolved": None if not doubled else doubled.get("resolved"),
         "bound_licensed": licensed,
         "realizable_pct": realizable,
         "realizable_per_layer_us": realizable / 100.0 * best["full_ms"] * 1000.0 / layers,
@@ -379,6 +398,19 @@ def render_markdown(s):
                     f"cutoff, so the demotion holds for any cutoff above "
                     f"{g['mirror_ratio']:.3f}. The cutoff was chosen after seeing the data; this "
                     "ratio is what lets a reader judge how much that choice mattered."]
+        if g.get("noise_pct") is not None:
+            res = ("above" if g.get("doubling_resolved") else "**inside**")
+            out += ["",
+                    f"Repeat spread at this configuration is {g['noise_pct']:.2f}% of a step. The "
+                    f"removal ({g['saving_pct']:.2f}%) is "
+                    f"{'above' if g.get('removal_resolved') else 'inside'} it; the doubling "
+                    f"({g['doubled_cost_pct']:+.2f}%) is {res} it."]
+            if not g.get("doubling_resolved"):
+                out += ["",
+                        "So the realizable figure is bounded by the instrument, not measured by "
+                        "it: what the probe establishes is that the doubling cost is *at most* "
+                        "about the noise floor, which is already well inside the dead band. A "
+                        "tighter number would need a lower-variance rig, not a different verdict."]
         out += ["", f"**Verdict: {g['verdict']}**"]
 
     if s["launch_structure"]:
