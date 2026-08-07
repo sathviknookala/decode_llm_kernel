@@ -90,7 +90,7 @@ def repeat_stats(samples):
     }
 
 
-def measure(model, cfg, mode, rung, args, device="cuda"):
+def measure(model, cfg, mode, rung, args, arch, device="cuda"):
     max_cache_len = cfg.ctx + headroom_slots(args)
     row = {
         **cfg.as_row(), "mode": mode, "rung": rung.label,
@@ -106,7 +106,7 @@ def measure(model, cfg, mode, rung, args, device="cuda"):
         cache = dl.build_cache(model, cfg, max_cache_len, device)
         dl.prefill(model, cache, cfg, device)
         dl.assert_static_addresses(cache)
-        with apply_rung(rung.label):
+        with apply_rung(rung.label, arch):
             callable_ = dl.build_callable(model, mode)
             step = dl.make_step(callable_, cache, cfg, cfg.ctx, device)
             graphs_before, _ = _compiled_evidence()
@@ -179,10 +179,13 @@ def main():
 
     print(f"loading {args.model} ...", flush=True)
     model = dl.load_model(dl.DecodeConfig(args.model, 1, 1), device="cuda")
-    assert_patch_target_reachable(model)
+    arch = assert_patch_target_reachable(model)
     text = model.config.get_text_config(decoder=True)
     print(f"  {text.num_hidden_layers} layers, sliding_window={text.sliding_window}, "
           f"weights {torch.cuda.memory_allocated()/1e9:.1f} GB", flush=True)
+    print(f"  arch {arch.model_type} -> {arch.module.__name__}, "
+          f"op_replaced_ref {'supported' if arch.supports_ref_replacement else 'UNSUPPORTED'}",
+          flush=True)
 
     weights_gb = torch.cuda.memory_allocated() / 1e9
     rows = []
@@ -206,7 +209,7 @@ def main():
         for mode in args.modes:
             baseline = None
             for rung in rungs:
-                row = measure(model, cfg, mode, rung, args)
+                row = measure(model, cfg, mode, rung, args, arch)
                 rows.append(row)
                 ms = row.get("amortized_step_ms")
                 if not ms:
@@ -225,6 +228,7 @@ def main():
     meta = env_metadata(0, cli_args=vars(args), extra={
         "model_id": args.model,
         "sliding_window_disabled": True,
+        "arch_module": arch.module.__name__,
     })
     record_gpu_state_end(meta, 0)
     write_csv(args.out, rows)

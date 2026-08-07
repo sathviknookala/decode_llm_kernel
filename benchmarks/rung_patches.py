@@ -5,6 +5,7 @@ on purpose to remove or duplicate work while holding every shape, dtype and allo
 Only `full` and `op_replaced_ref` produce meaningful logits.
 """
 import contextlib
+import sys
 from dataclasses import dataclass
 
 import torch
@@ -49,7 +50,44 @@ def resolve_rungs(labels):
     return [BY_LABEL[l] for l in labels]
 
 
-def assert_patch_target_reachable(model):
+@dataclass(frozen=True)
+class Arch:
+    """Where a given model architecture keeps the two things the ladder patches.
+
+    Resolved from the live model rather than imported, because patching
+    `models.mistral.modeling_mistral` while running Phi-3 installs cleanly, does nothing, and
+    reports a clean 0% operator share -- the inert-patch failure the meta-test exists to catch.
+    """
+    model_type: str
+    module: object
+    attention_cls: type
+    ref_forward: object = None
+
+    @property
+    def supports_ref_replacement(self):
+        return self.ref_forward is not None
+
+
+def resolve_arch(model):
+    """The modeling module the attention layer's `apply_rotary_pos_emb` actually resolves in."""
+    attn = _first_attention(model)
+    module = sys.modules[type(attn).__module__]
+    if not hasattr(module, "apply_rotary_pos_emb"):
+        raise RuntimeError(
+            f"{module.__name__} has no apply_rotary_pos_emb; the RoPE rungs have nothing to "
+            "patch and would silently measure nothing")
+    model_type = getattr(model.config.get_text_config(decoder=True), "model_type", "unknown")
+    return Arch(model_type, module, type(attn), REF_FORWARDS.get(model_type))
+
+
+def _first_attention(model):
+    for m in model.modules():
+        if type(m).__name__.endswith("Attention") and hasattr(m, "layer_idx"):
+            return m
+    raise RuntimeError("no attention module with a layer_idx found; cannot resolve patch targets")
+
+
+def assert_patch_target_reachable(model, arch=None):
     """`kernels` would reroute apply_rotary_pos_emb past the monkeypatch without erroring."""
     import importlib.util
     if importlib.util.find_spec("kernels") is not None:
@@ -58,6 +96,14 @@ def assert_patch_target_reachable(model):
             "kernel and the rung patches would silently not apply")
     if getattr(model, "use_kernels", False):
         raise RuntimeError("model.use_kernels is True; rung patches would silently not apply")
+    arch = arch or resolve_arch(model)
+    if arch.module.apply_rotary_pos_emb is not _rope_of(arch):
+        raise RuntimeError(f"{arch.module.__name__}.apply_rotary_pos_emb is already patched")
+    return arch
+
+
+def _rope_of(arch):
+    return getattr(arch.module, "apply_rotary_pos_emb")
 
 
 def _identity_rope(q, k, cos, sin, unsqueeze_dim=1):
@@ -123,6 +169,12 @@ def _ref_attention_forward(self, hidden_states, position_embeddings, attention_m
     return self.o_proj(attn_output), attn_weights
 
 
+# op_replaced_ref needs an adapter per architecture: the seam depends on how the model shapes
+# Q/K/V (Phi-3 fuses the projection) and on the attention-interface call. Architectures without
+# one refuse the rung rather than running it as a no-op.
+REF_FORWARDS = {"mistral": _ref_attention_forward}
+
+
 @contextlib.contextmanager
 def _patched(targets):
     saved = [(obj, name, getattr(obj, name)) for obj, name, _ in targets]
@@ -135,11 +187,15 @@ def _patched(targets):
             setattr(obj, name, old)
 
 
+MISTRAL_ARCH = Arch("mistral", modeling_mistral, modeling_mistral.MistralAttention,
+                    _ref_attention_forward)
+
+
 @contextlib.contextmanager
-def apply_rung(label):
-    """Install a rung's patches. Reverts on exit, including on exception."""
+def apply_rung(label, arch=MISTRAL_ARCH):
+    """Install a rung's patches on `arch`. Reverts on exit, including on exception."""
     rung = BY_LABEL[label]
-    orig_rope = modeling_mistral.apply_rotary_pos_emb
+    orig_rope = _rope_of(arch)
     orig_update = Cache.update
     targets = []
 
@@ -148,17 +204,22 @@ def apply_rung(label):
         return
 
     if rung.label in (OP_REMOVED, ROPE_REMOVED):
-        targets.append((modeling_mistral, "apply_rotary_pos_emb", _identity_rope))
+        targets.append((arch.module, "apply_rotary_pos_emb", _identity_rope))
     if rung.label in (OP_REMOVED, APPEND_REMOVED):
         targets.append((Cache, "update", _no_write_update))
     if rung.label == OP_DOUBLED:
         def doubled_rope(q, k, cos, sin, unsqueeze_dim=1):
             q, k = orig_rope(q, k, cos, sin, unsqueeze_dim)
             return orig_rope(q, k, cos, sin, unsqueeze_dim)
-        targets.append((modeling_mistral, "apply_rotary_pos_emb", doubled_rope))
+        targets.append((arch.module, "apply_rotary_pos_emb", doubled_rope))
         targets.append((Cache, "update", _doubled_update(orig_update)))
     if rung.label == OP_REPLACED_REF:
-        targets.append((modeling_mistral.MistralAttention, "forward", _ref_attention_forward))
+        if not arch.supports_ref_replacement:
+            raise NotImplementedError(
+                f"op_replaced_ref has no seam adapter for {arch.model_type!r}; the rung would "
+                "patch nothing and time an unmodified step. Write one or exclude the rung with "
+                "--rungs.")
+        targets.append((arch.attention_cls, "forward", arch.ref_forward))
 
     with _patched(targets):
         yield rung
