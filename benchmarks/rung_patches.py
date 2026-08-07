@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 import torch
 from transformers.cache_utils import Cache, StaticLayer
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.mistral import modeling_mistral
 
 from decode_kernels.reference import apply_rope
@@ -144,35 +145,57 @@ def _ref_rope_append(q, k, v, cos, sin, layer, positions, request_indices):
     return q_rot.unsqueeze(2), layer.keys, layer.values
 
 
-def _ref_attention_forward(self, hidden_states, position_embeddings, attention_mask,
-                           past_key_values=None, **kwargs):
-    input_shape = hidden_states.shape[:-1]
-    hidden_shape = (*input_shape, -1, self.head_dim)
-    query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-    key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-    value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+def _split_qkv_separate(self, hidden_states, hidden_shape):
+    """Three projections, each already `head_dim`-packed. Llama/Mistral shape."""
+    return tuple(p(hidden_states).view(hidden_shape).transpose(1, 2)
+                 for p in (self.q_proj, self.k_proj, self.v_proj))
 
-    cos, sin = position_embeddings
-    layer = past_key_values.layers[self.layer_idx]
-    positions = layer.cumulative_length.expand(hidden_states.shape[0])
-    request_indices = torch.arange(hidden_states.shape[0], device=hidden_states.device)
-    query_states, key_states, value_states = _ref_rope_append(
-        query_states, key_states, value_states, cos, sin, layer, positions, request_indices)
 
-    attention_interface = modeling_mistral.ALL_ATTENTION_FUNCTIONS.get_interface(
-        self.config._attn_implementation, modeling_mistral.eager_attention_forward)
-    attn_output, attn_weights = attention_interface(
-        self, query_states, key_states, value_states, attention_mask,
-        dropout=0.0, scaling=self.scaling,
-        sliding_window=getattr(self.config, "sliding_window", None), **kwargs)
-    attn_output = attn_output.reshape(*input_shape, -1).contiguous()
-    return self.o_proj(attn_output), attn_weights
+def _split_qkv_fused(self, hidden_states, hidden_shape):
+    """One projection sliced three ways -- the fused-QKV layout operation_semantics.md calls a
+    requirement: head_dim stays contiguous but the token stride is the full fused width."""
+    qkv = self.qkv_proj(hidden_states)
+    q_pos = self.config.num_attention_heads * self.head_dim
+    kv = self.num_key_value_heads * self.head_dim
+    parts = (qkv[..., :q_pos], qkv[..., q_pos:q_pos + kv], qkv[..., q_pos + kv:])
+    return tuple(p.view(hidden_shape).transpose(1, 2) for p in parts)
+
+
+def _make_ref_forward(split_qkv):
+    def forward(self, hidden_states, position_embeddings, attention_mask,
+                past_key_values=None, **kwargs):
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+        query_states, key_states, value_states = split_qkv(self, hidden_states, hidden_shape)
+
+        cos, sin = position_embeddings
+        layer = past_key_values.layers[self.layer_idx]
+        positions = layer.cumulative_length.expand(hidden_states.shape[0])
+        request_indices = torch.arange(hidden_states.shape[0], device=hidden_states.device)
+        query_states, key_states, value_states = _ref_rope_append(
+            query_states, key_states, value_states, cos, sin, layer, positions, request_indices)
+
+        module = sys.modules[type(self).__module__]
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, module.eager_attention_forward)
+        attn_output, attn_weights = attention_interface(
+            self, query_states, key_states, value_states, attention_mask,
+            dropout=0.0, scaling=self.scaling,
+            sliding_window=getattr(self.config, "sliding_window", None), **kwargs)
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        return self.o_proj(attn_output), attn_weights
+    return forward
 
 
 # op_replaced_ref needs an adapter per architecture: the seam depends on how the model shapes
-# Q/K/V (Phi-3 fuses the projection) and on the attention-interface call. Architectures without
-# one refuse the rung rather than running it as a no-op.
-REF_FORWARDS = {"mistral": _ref_attention_forward}
+# Q/K/V. Everything after the split is shared. Architectures without an entry refuse the rung
+# rather than running it as a no-op and crediting the reference with an unmodified step.
+_ref_attention_forward = _make_ref_forward(_split_qkv_separate)
+REF_FORWARDS = {
+    "mistral": _ref_attention_forward,
+    "llama": _ref_attention_forward,
+    "phi3": _make_ref_forward(_split_qkv_fused),
+}
 
 
 @contextlib.contextmanager

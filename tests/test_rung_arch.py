@@ -14,6 +14,7 @@ from transformers.models.phi3 import modeling_phi3
 from benchmarks import decode_loop as dl
 from benchmarks.rung_patches import (
     MISTRAL_ARCH,
+    Arch,
     OP_DOUBLED,
     OP_REMOVED,
     OP_REPLACED_REF,
@@ -37,17 +38,26 @@ def tiny_phi3():
     return Phi3ForCausalLM(cfg).to("cuda", torch.float32).eval()
 
 
-def _decode_step(model):
-    """The rungs patch the decode path, so they have to be exercised on it: op_removed returns
-    the cache's own tensors, which only exist once prefill has initialized them."""
+def _prefilled(model):
+    """Prefill runs unpatched, exactly as the probe does it. The seam adapters assume a decode
+    step (S=1); running prefill inside a rung would feed them an S=ctx tensor."""
     cfg = dl.DecodeConfig("tiny-phi3", BATCH, CTX, "fp32")
     cache = dl.build_cache(model, cfg, CTX + HEADROOM)
     dl.prefill(model, cache, cfg)
+    return cfg, cache
+
+
+def _step(model, cache, cfg):
     ids = torch.full((BATCH, 1), 3, device="cuda")
-    pos = torch.tensor([CTX], device="cuda")
+    pos = torch.tensor([cfg.ctx], device="cuda")
     with torch.inference_mode():
         return model(input_ids=ids, past_key_values=cache, cache_position=pos,
                      use_cache=True).logits.clone()
+
+
+def _decode_step(model):
+    cfg, cache = _prefilled(model)
+    return _step(model, cache, cfg)
 
 
 @cuda_only
@@ -84,20 +94,33 @@ def test_the_architecture_independent_rungs_bite_on_phi3(tiny_phi3, label):
 
 
 @cuda_only
-def test_op_replaced_ref_refuses_an_architecture_it_has_no_seam_for(tiny_phi3):
-    """Phi-3 fuses QKV into one projection, so the mistral seam does not transfer. Refusing is
-    the only safe answer -- running it would time an unmodified step and call it the reference."""
+def test_phi3_has_a_seam_adapter_and_it_is_numerically_equivalent(tiny_phi3):
+    """Phi-3 slices one fused qkv_proj three ways -- the layout operation_semantics.md calls a
+    hard requirement, and the only anchor in the rig that actually exercises it. If the seam
+    were not equivalent the ablation would be comparing two different models."""
     arch = resolve_arch(tiny_phi3)
-    assert not arch.supports_ref_replacement
-    with pytest.raises(NotImplementedError, match="no seam adapter"):
-        with apply_rung(OP_REPLACED_REF, arch):
-            pass
+    assert arch.supports_ref_replacement
+    cfg, cache = _prefilled(tiny_phi3)
+    reference = _step(tiny_phi3, cache, cfg)
+
+    cfg2, cache2 = _prefilled(tiny_phi3)
+    with apply_rung(OP_REPLACED_REF, arch):
+        replaced = _step(tiny_phi3, cache2, cfg2)
+    torch.testing.assert_close(replaced, reference, atol=2e-4, rtol=2e-4)
 
 
 @cuda_only
-def test_refusing_leaves_no_patch_installed(tiny_phi3):
+def test_the_fused_and_separate_seams_are_not_the_same_function(tiny_phi3):
+    """A registry that silently handed Phi-3 the separate-projection adapter would raise on
+    q_proj rather than mislead, but the split is the whole point of the entry."""
+    assert resolve_arch(tiny_phi3).ref_forward is not MISTRAL_ARCH.ref_forward
+
+
+@cuda_only
+def test_an_architecture_with_no_entry_still_refuses(tiny_phi3):
+    unadapted = Arch("not_a_real_arch", modeling_phi3, modeling_phi3.Phi3Attention, None)
     before = modeling_phi3.Phi3Attention.forward
-    with pytest.raises(NotImplementedError):
-        with apply_rung(OP_REPLACED_REF, resolve_arch(tiny_phi3)):
+    with pytest.raises(NotImplementedError, match="no seam adapter"):
+        with apply_rung(OP_REPLACED_REF, unadapted):
             pass
     assert modeling_phi3.Phi3Attention.forward is before
