@@ -272,3 +272,31 @@ def test_the_guard_denies_the_config_that_actually_oomed():
 
     assert need(1024) > budget
     assert need(512) <= budget
+
+
+# --- repeat statistics ------------------------------------------------------------------------
+
+from benchmarks.probe_amdahl import repeat_stats  # noqa: E402
+
+
+def test_repeat_stats_reports_the_median_not_the_best():
+    """A min would flatter every rung equally but would understate the noise the gate has to
+    clear, which is the whole reason repeats exist."""
+    s = repeat_stats([10.0, 11.0, 12.0])
+    assert s["amortized_step_ms"] == 11.0
+    assert (s["amortized_min_ms"], s["amortized_max_ms"]) == (10.0, 12.0)
+    assert s["repeats"] == 3
+
+
+def test_spread_is_expressed_against_the_median():
+    s = repeat_stats([9.9, 10.0, 10.1])
+    assert s["amortized_spread_pct"] == pytest.approx(2.0)
+
+
+def test_a_single_repeat_reports_zero_spread_rather_than_failing():
+    """--repeats 1 must stay usable for smoke runs; it just cannot claim a noise floor."""
+    s = repeat_stats([7.5])
+    assert s["amortized_step_ms"] == 7.5
+    assert s["amortized_stdev_ms"] == 0.0
+    assert s["amortized_spread_pct"] == 0.0
+    assert s["repeats"] == 1

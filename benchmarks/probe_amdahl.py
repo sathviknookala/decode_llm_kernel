@@ -7,6 +7,7 @@ operation's launches as well as its compute, which is what a fused kernel also d
 """
 import argparse
 import os
+import statistics as st
 import sys
 
 import torch
@@ -71,6 +72,24 @@ def headroom_slots(args):
     return 2 * (args.warmup + args.iters) + 8
 
 
+def repeat_stats(samples):
+    """Spread of repeated timings of one already-compiled callable.
+
+    This is run-to-run timing noise, not compile-to-compile variance: the repeats reuse one
+    compiled instance. Rungs are separately compiled, so a rung-vs-rung delta carries variance
+    this does not capture -- see LIMITATIONS.
+    """
+    s = sorted(samples)
+    return {
+        "amortized_step_ms": st.median(s),
+        "amortized_min_ms": s[0],
+        "amortized_max_ms": s[-1],
+        "amortized_stdev_ms": st.pstdev(s) if len(s) > 1 else 0.0,
+        "amortized_spread_pct": (s[-1] - s[0]) / st.median(s) * 100.0 if st.median(s) else 0.0,
+        "repeats": len(s),
+    }
+
+
 def measure(model, cfg, mode, rung, args, device="cuda"):
     max_cache_len = cfg.ctx + headroom_slots(args)
     row = {
@@ -91,10 +110,12 @@ def measure(model, cfg, mode, rung, args, device="cuda"):
             callable_ = dl.build_callable(model, mode)
             step = dl.make_step(callable_, cache, cfg, cfg.ctx, device)
             graphs_before, _ = _compiled_evidence()
+            samples = []
             with torch.inference_mode():
-                dl.reset_counters(cache, cfg.ctx)
-                amortized = time_amortized_call(step, args.warmup, args.iters)
-                assert_no_roll(cache)
+                for _ in range(args.repeats):
+                    dl.reset_counters(cache, cfg.ctx)
+                    samples.append(time_amortized_call(step, args.warmup, args.iters))
+                    assert_no_roll(cache)
                 dl.reset_counters(cache, cfg.ctx)
                 synchronized = time_synchronized_call(
                     step, args.warmup, max(20, args.iters // 5))
@@ -106,7 +127,7 @@ def measure(model, cfg, mode, rung, args, device="cuda"):
                     f"{mode}/{rung.label} captured no graph -- dynamo silently fell back to "
                     "eager and this row would corrupt the gate")
             row.update({
-                "amortized_step_ms": amortized,
+                **repeat_stats(samples),
                 "synchronized_step_ms": synchronized,
                 "unique_graphs": graphs,
                 "calls_captured": calls_captured,
@@ -131,6 +152,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--warmup", type=int, default=20)
     ap.add_argument("--iters", type=int, default=200)
+    ap.add_argument("--repeats", type=int, default=3,
+                    help="re-times the same compiled callable; the gate turns on differences of "
+                         "under 1%% of a step, which is not obviously above run-to-run noise")
     ap.add_argument("--model", default=dl.DEFAULT_MODEL)
     ap.add_argument("--modes", nargs="+", default=list(dl.MODES))
     ap.add_argument("--rungs", nargs="+", default=[r.label for r in RUNGS])
@@ -193,7 +217,8 @@ def main():
                 row["saving_vs_full_pct"] = (
                     "" if not baseline else (baseline - ms) / baseline * 100)
                 row["per_layer_us"] = ms * 1000.0 / text.num_hidden_layers
-                print(f"  {mode:16s} {rung.label:16s} {ms:8.3f} ms/step  {saving}", flush=True)
+                print(f"  {mode:16s} {rung.label:16s} {ms:8.3f} ms/step  {saving}"
+                      f"  (spread {row['amortized_spread_pct']:.2f}%)", flush=True)
         # written per config: a crash in a later config must not cost the earlier ones
         _write(args, rows)
 
