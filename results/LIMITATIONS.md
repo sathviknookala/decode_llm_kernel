@@ -299,8 +299,23 @@ operator; the NVTX range marks the measured region. The `.nsys-rep` and `.sqlite
 gitignored as large regenerable binaries — regenerate with `benchmarks/nsight_capture.sh`.
 Only the kernel-summary CSVs are tracked.
 
-**No Nsight Compute.** No occupancy, register pressure, sector efficiency, or achieved-bandwidth
-counters — so no statement here explains *why* a kernel takes the time it does.
+**No Nsight Compute — and on this machine it is a permission wall, not a missing harness.**
+No occupancy, register pressure, sector efficiency, or achieved-bandwidth counters, so no
+statement here explains *why* a kernel takes the time it does. `benchmarks/ncu_capture.sh`
+requests `dram__bytes_{read,write}.sum` and `lts__t_sectors_op_{read,write}.sum` — the pair that
+would settle whether the rows above 100% of empirical bandwidth are L2 service — and
+`benchmarks/ncu_report.py` reduces that output against the logical count. Both are written and
+the reporter is tested, but `ncu` returns **`ERR_NVGPUCTRPERM`** for this user (verified
+2026-08-07, ncu 2025.2.1), the same class of block as `--lock-clocks`. Enabling counters needs a
+root-level change (`NVreg_RestrictProfilingToAdminUsers=0` plus a reboot, or running the capture
+as root); the capture script probes for the denial up front and exits 3 with those instructions
+rather than profiling every configuration first.
+
+**The ncu parser has never seen real ncu output.** Because no capture can run here,
+`parse_ncu_csv` is written against the documented `--csv` schema and tested against a fixture
+built from it. Treat the first real capture as also testing the parser: a column-name change
+between ncu versions would surface as zero metric rows, which the reporter refuses rather than
+reporting as zero traffic.
 
 ---
 
