@@ -233,6 +233,29 @@ irrelevant here, but no per-layer figure in this file is measured directly -- ev
 delta divided by 32. Single seed, single GPU, single model, bf16 only, one prompt length per
 configuration, no prefill measurements.
 
+**This file has one timing per rung and therefore no error bars, and the verdict turns on
+differences near the noise floor.** The realizable figure is 0.81% of a step; a three-repeat check
+run by hand during the session put run-to-run spread around 0.4%. Same order. `--repeats` was
+added afterwards and records median/min/max/stdev/spread per rung, and the summariser marks a
+saving smaller than the observed spread as unresolved -- but **this CSV predates that flag**, so
+`noise_pct` is absent and the summary omits the resolved/unresolved paragraph. Until it is
+re-run, read 0.81% as *at most about the noise floor*, which is inside the dead band either way,
+rather than as a measured quantity. Regenerate with
+`python benchmarks/probe_amdahl.py --repeats 3`.
+
+Note also that repeats reuse one compiled instance, so even after a re-run the spread is timing
+noise only. Rungs are separately compiled -- that is what guarantees the patch is traced -- so a
+rung-vs-rung delta carries compile-to-compile variance nothing here captures.
+
+**Every row is Mistral, and the architecture-generic patch path is untested against real
+weights.** When this file was produced, `rung_patches` hardcoded Mistral's modeling module, so the
+`--model` flag would have silently patched a module a non-Mistral model never consults and
+reported a clean 0% share. That is fixed (patch targets resolve from the live model) and covered
+by a Phi-3 regression test, and a fused-QKV seam adapter now exists -- but no non-Mistral anchor
+has been run end to end. The transfer formula in `benchmark_methodology.md`, which predicts how
+the fraction moves with a different weight-read denominator, therefore remains asserted rather
+than tested.
+
 ---
 
 ## `raw/bandwidth_reference.json`
