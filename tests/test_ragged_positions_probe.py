@@ -62,38 +62,57 @@ def test_a_spread_outside_the_cache_is_refused(spread):
         spread_position_sets(4, 2048, spread, 4, seed=1, device="cpu")
 
 
-def test_the_ladder_starts_shared_and_is_otherwise_distinct():
+def test_the_ladder_brackets_the_spread_rungs_with_the_shared_one():
+    """Measured once, the shared rung is always first, and 'the first rung is slower' would be
+    indistinguishable from an effect of sharing the tensor."""
     got = rungs(2048)
     assert got[0] == (1, SHARED)
-    assert all(mode == DISTINCT for _, mode in got[1:])
-    assert [s for s, _ in got[1:]] == list(SPREAD_LADDER)
+    assert got[-1] == (1, SHARED)
+    assert all(mode == DISTINCT for _, mode in got[1:-1])
+    assert [s for s, _ in got[1:-1]] == list(SPREAD_LADDER)
 
 
 def test_the_ladder_drops_rungs_wider_than_the_cache():
     assert all(s <= 128 for s, _ in rungs(128))
 
 
-def test_ratios_are_against_the_same_impls_shared_rung():
-    rows = [
-        {"impl": "compile", "tensor_mode": SHARED, "device_median_ms": 0.02,
-         "amortized_call_ms": 0.010},
-        {"impl": "compile", "tensor_mode": DISTINCT, "device_median_ms": 0.028,
-         "amortized_call_ms": 0.014},
-        {"impl": "graph_compile", "tensor_mode": SHARED, "device_median_ms": 0.01,
-         "amortized_call_ms": 0.005},
-        {"impl": "graph_compile", "tensor_mode": DISTINCT, "device_median_ms": 0.01,
-         "amortized_call_ms": 0.005},
-    ]
-    got = {(r["impl"], r["tensor_mode"]): r for r in with_ratios(rows)}
-    assert got[("compile", DISTINCT)]["amortized_call_ratio"] == pytest.approx(1.4)
-    assert got[("graph_compile", DISTINCT)]["amortized_call_ratio"] == pytest.approx(1.0)
-    assert got[("compile", SHARED)]["device_median_ratio"] == pytest.approx(1.0)
+def _rung(impl, mode, idx, ms):
+    return {"impl": impl, "tensor_mode": mode, "rung_index": idx,
+            "device_median_ms": ms * 2, "amortized_call_ms": ms}
+
+
+def test_ratios_are_against_the_same_impls_opening_shared_rung():
+    rows = [_rung("compile", SHARED, 0, 0.010), _rung("compile", DISTINCT, 1, 0.014),
+            _rung("compile", SHARED, 2, 0.010),
+            _rung("graph_compile", SHARED, 0, 0.005),
+            _rung("graph_compile", DISTINCT, 1, 0.005),
+            _rung("graph_compile", SHARED, 2, 0.005)]
+    got = {(r["impl"], r["tensor_mode"], r["rung_index"]): r for r in with_ratios(rows)}
+    assert got[("compile", DISTINCT, 1)]["amortized_call_ratio"] == pytest.approx(1.4)
+    assert got[("graph_compile", DISTINCT, 1)]["amortized_call_ratio"] == pytest.approx(1.0)
+    assert got[("compile", SHARED, 0)]["device_median_ratio"] == pytest.approx(1.0)
+
+
+def test_a_drifting_run_is_reported_rather_than_folded_into_the_effect():
+    """Both shared rungs hold tensor and values fixed, so a ratio between them is drift over
+    the run -- and it bounds how much of the distinct rung's ratio ordering alone explains."""
+    rows = [_rung("compile", SHARED, 0, 0.010), _rung("compile", DISTINCT, 1, 0.008),
+            _rung("compile", SHARED, 2, 0.008)]
+    got = with_ratios(rows)
+    assert all(r["ordering_drift"] == pytest.approx(0.8) for r in got)
+
+
+def test_a_stable_run_reports_no_drift():
+    rows = [_rung("compile", SHARED, 0, 0.010), _rung("compile", DISTINCT, 1, 0.008),
+            _rung("compile", SHARED, 2, 0.010)]
+    assert with_ratios(rows)[0]["ordering_drift"] == pytest.approx(1.0)
 
 
 def test_a_missing_baseline_leaves_the_ratio_blank_rather_than_one():
-    rows = [{"impl": "compile", "tensor_mode": DISTINCT, "device_median_ms": 0.02,
-             "amortized_call_ms": 0.01}]
-    assert with_ratios(rows)[0]["amortized_call_ratio"] == ""
+    rows = [_rung("compile", DISTINCT, 1, 0.01)]
+    got = with_ratios(rows)[0]
+    assert got["amortized_call_ratio"] == ""
+    assert got["ordering_drift"] == ""
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

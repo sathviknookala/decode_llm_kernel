@@ -69,9 +69,16 @@ def spread_position_sets(num_requests, cache_alloc_len, spread, n_sets, seed, de
 
 def rungs(cache_alloc_len):
     """(spread, tensor_mode) pairs. The shared rung is the sweep's uniform baseline; every
-    other rung is distinct-tensor, so tensor identity is held fixed across the spread ladder."""
+    other rung is distinct-tensor, so tensor identity is held fixed across the spread ladder.
+
+    The shared rung is measured twice, first and last. Measured once it is always the first
+    rung of the config, and "the first rung is slower" would be indistinguishable from any
+    effect of the tensor being shared -- so without the repeat every ratio here has an
+    ordering confound sitting underneath it.
+    """
     out = [(1, SHARED)]
     out += [(s, DISTINCT) for s in SPREAD_LADDER if s <= cache_alloc_len]
+    out += [(1, SHARED)]
     return out
 
 
@@ -82,7 +89,7 @@ def probe(cfg, specs, device, seed, warmup, iters, n_sets, fresh_args=False):
     only the reallocating arm can show it."""
     args = None if fresh_args else build_op_args(cfg, device, seed, None)
     rows = []
-    for spread, tensor_mode in rungs(cfg.cache_alloc_len):
+    for rung_index, (spread, tensor_mode) in enumerate(rungs(cfg.cache_alloc_len)):
         position_sets = spread_position_sets(cfg.num_requests, cfg.cache_alloc_len, spread,
                                              n_sets, seed, device, tensor_mode)
         for spec in specs:
@@ -96,8 +103,8 @@ def probe(cfg, specs, device, seed, warmup, iters, n_sets, fresh_args=False):
                 amortized = time_amortized_call(thunk, warmup, iters)
             rows.append({
                 **cfg.as_row(), "impl": spec.label, "spread": spread,
-                "tensor_mode": tensor_mode, "position_sets": n_sets,
-                "fresh_args": fresh_args,
+                "tensor_mode": tensor_mode, "rung_index": rung_index,
+                "position_sets": n_sets, "fresh_args": fresh_args,
                 "distinct_slots_per_request": min(spread, n_sets),
                 "device_median_ms": stats["device_median_ms"],
                 "device_min_ms": stats["device_min_ms"],
@@ -116,14 +123,29 @@ def probe(cfg, specs, device, seed, warmup, iters, n_sets, fresh_args=False):
 
 
 def with_ratios(rows):
-    """Every row against its own impl's shared-tensor baseline, which is the quantity the
-    sweep reported as ragged/uniform."""
-    baseline = {r["impl"]: r for r in rows if r["tensor_mode"] == SHARED}
+    """Every row against its own impl's opening shared-tensor rung, which is the quantity the
+    sweep reported as ragged/uniform.
+
+    ordering_drift is the closing shared rung against the opening one. Both hold the tensor
+    and the values fixed, so anything other than 1.0 there is drift over the config's run --
+    and it is the amount of any other ratio in the config that ordering alone can explain.
+    """
+    def opening(impl):
+        shared = [r for r in rows if r["impl"] == impl and r["tensor_mode"] == SHARED]
+        return min(shared, key=lambda r: r["rung_index"]) if shared else None
+
+    def closing(impl):
+        shared = [r for r in rows if r["impl"] == impl and r["tensor_mode"] == SHARED]
+        return max(shared, key=lambda r: r["rung_index"]) if len(shared) > 1 else None
+
     for r in rows:
-        b = baseline.get(r["impl"])
+        b = opening(r["impl"])
         for col in ("device_median_ms", "amortized_call_ms"):
             r[f"{col.replace('_ms', '')}_ratio"] = (
                 r[col] / b[col] if b and b[col] else "")
+        last = closing(r["impl"])
+        r["ordering_drift"] = (last["amortized_call_ms"] / b["amortized_call_ms"]
+                               if last and b and b["amortized_call_ms"] else "")
     return rows
 
 
