@@ -75,6 +75,28 @@ def _blank_metrics():
         "pct_of_empirical_bw", "pct_of_scattered_write_bw")}
 
 
+NUMERICS_FIELDS = ("max_abs_diff_q", "max_abs_diff_k_cache", "v_byte_exact",
+                   "unaddressed_slots_intact", "tolerance_atol", "tolerance_rtol")
+
+
+def _blank_numerics():
+    return {k: "" for k in NUMERICS_FIELDS}
+
+
+def numerics_row(report):
+    """The gate's measured deltas as columns. The locked dtype policy requires reporting
+    numerical deltas, not just pass/fail, and a string in validation_detail is not a column
+    anything can aggregate over."""
+    return {
+        "max_abs_diff_q": report["max_abs_diff_q"],
+        "max_abs_diff_k_cache": report["max_abs_diff_k_cache"],
+        "v_byte_exact": report["v_byte_exact"],
+        "unaddressed_slots_intact": report["unaddressed_slots_intact"],
+        "tolerance_atol": report["tolerance"]["atol"],
+        "tolerance_rtol": report["tolerance"]["rtol"],
+    }
+
+
 def graph_savings(rows):
     config_keys = tuple(Config.__dataclass_fields__)
     timed = {(r["impl"], tuple(r.get(k) for k in config_keys)): r for r in rows
@@ -117,7 +139,7 @@ def run_config(cfg, device, args_ns, bw_ref_gbps, specs, scattered_ref_gbps=None
                   flush=True)
             rows.append({**base, "validation": "ERROR",
                          "validation_detail": f"{type(e).__name__}: {e}",
-                         **_blank_metrics()})
+                         **_blank_numerics(), **_blank_metrics()})
             _release(runner)
             continue
         if not report["ok"]:
@@ -125,7 +147,7 @@ def run_config(cfg, device, args_ns, bw_ref_gbps, specs, scattered_ref_gbps=None
             print(f"  VALIDATION FAILED  {spec.label:14s} {cfg.label()}: {detail}", flush=True)
             rows.append({**base, "validation": "FAIL", "validation_detail": detail,
                          "validation_cases": "|".join(report["cases"]),
-                         **_blank_metrics()})
+                         **numerics_row(report), **_blank_metrics()})
             _release(runner)
             continue
         op_args = build_op_args(cfg, device, seed, position_sets[0])
@@ -137,7 +159,7 @@ def run_config(cfg, device, args_ns, bw_ref_gbps, specs, scattered_ref_gbps=None
                                            f"k_maxdiff={report['max_abs_diff_k_cache']:.2e} "
                                            f"cases={report['num_cases']}"),
                      "validation_cases": "|".join(report["cases"]),
-                     **timed})
+                     **numerics_row(report), **timed})
         _release(runner)
     return rows
 
@@ -205,7 +227,7 @@ def _run_benchmark(args, device, specs, modes, clock_status):
             all_rows.append({"impl": "skipped", **cfg.as_row(), "seed": args.seed,
                              "validation": "not-run",
                              "validation_detail": f"peak cache {peak_gb:.1f}GB > budget",
-                             **_blank_metrics()})
+                             **_blank_numerics(), **_blank_metrics()})
             continue
         for r in run_config(cfg, device, args, bw_ref_gbps, specs, scattered_ref_gbps):
             all_rows.append(r)

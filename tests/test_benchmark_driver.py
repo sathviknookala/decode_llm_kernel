@@ -4,7 +4,12 @@ import pytest
 import torch
 
 from benchmarks import positions as pos
-from benchmarks.benchmark_operator import bench_impl, graph_savings, run_config
+from benchmarks.benchmark_operator import (
+    NUMERICS_FIELDS,
+    bench_impl,
+    graph_savings,
+    run_config,
+)
 from benchmarks.impls import DirectRunner, resolve_impls
 from benchmarks.workload import (
     IDENTITY,
@@ -86,6 +91,35 @@ def test_passing_rows_name_the_gate_that_cleared_them():
     assert rows[0]["validation"] == "pass"
     assert {"permuted-requests", "strided-qkv"}.issubset(cases)
     assert f"cases={len(cases)}" in rows[0]["validation_detail"]
+
+
+def test_passing_rows_carry_the_measured_deltas_as_columns():
+    """The locked dtype policy asks for deltas, not just pass/fail. They were computed by the
+    gate and discarded into a formatted string, which nothing can aggregate over."""
+    args = SimpleNamespace(seed=SEED, compile_mode=None, compile_backend="inductor",
+                           warmup=1, iters=1)
+    row = run_config(CFG, "cuda", args, None, resolve_impls(["eager"]))[0]
+    assert set(NUMERICS_FIELDS).issubset(row)
+    assert float(row["max_abs_diff_q"]) < float(row["tolerance_atol"])
+    assert row["v_byte_exact"] is True
+    assert row["unaddressed_slots_intact"] is True
+
+
+def test_error_rows_leave_the_delta_columns_blank_rather_than_zero():
+    """A zero delta on a row that never validated would read as a perfect match."""
+    class FailingSpec:
+        label = "graph_broken"
+
+        @staticmethod
+        def build(*_):
+            def fail(*_):
+                raise RuntimeError("capture permission denied")
+            return DirectRunner(fail)
+
+    args = SimpleNamespace(seed=SEED, compile_mode=None, compile_backend="inductor",
+                           warmup=1, iters=1)
+    row = run_config(CFG, "cuda", args, None, [FailingSpec()])[0]
+    assert all(row[f] == "" for f in NUMERICS_FIELDS)
 
 
 def test_graph_savings_pairs_matching_configs_only():

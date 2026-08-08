@@ -5,6 +5,8 @@ import pytest
 from benchmarks.summarize_results import (
     bandwidth_column_sanity,
     build_summary,
+    numerical_deltas,
+    read_rows,
     graph_launch_share,
     head_dim_response,
     ragged_uniform_ratio,
@@ -352,7 +354,9 @@ def test_the_gate_carries_whether_its_two_inputs_were_resolved(tmp_path):
 
 # --- the positive control -----------------------------------------------------------------
 
-from benchmarks.summarize_results import (  # noqa: E402
+from benchmarks.summarize_results import (
+    numerical_deltas,
+    read_rows,  # noqa: E402
     amdahl_control_check,
     amdahl_mirror_table,
 )
@@ -409,3 +413,67 @@ def test_the_control_paragraph_reaches_the_markdown(tmp_path):
     text = render_markdown(build_summary(base, {}, None, _both_modes(tmp_path, 3.0, 0.3)))
     assert "Positive control" in text
     assert "holds" in text
+
+
+def delta_row(impl, dq, dk, *, dtype="bf16", atol=8e-3, rtol=8e-3, v_exact=True,
+              intact=True, **kw):
+    return {**row(impl, 1.0, dtype=dtype, **kw), "max_abs_diff_q": str(dq),
+            "max_abs_diff_k_cache": str(dk), "tolerance_atol": str(atol),
+            "tolerance_rtol": str(rtol), "v_byte_exact": str(v_exact),
+            "unaddressed_slots_intact": str(intact)}
+
+
+def write_delta_csv(tmp_path, rows, name="deltas.csv"):
+    path = tmp_path / name
+    fields = []
+    for r in rows:
+        fields += [k for k in r if k not in fields]
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        w.writerows(rows)
+    return str(path)
+
+
+def test_deltas_report_the_worst_row_per_dtype():
+    rows = [delta_row("eager", 1e-3, 2e-3), delta_row("compile", 5e-3, 1e-3),
+            delta_row("eager", 1e-7, 1e-7, dtype="fp32", atol=1e-6, rtol=1e-6)]
+    by_dtype = {d["dtype_label"]: d for d in numerical_deltas(rows)}
+    assert by_dtype["bf16"]["max_abs_diff_q"] == pytest.approx(5e-3)
+    assert by_dtype["bf16"]["max_abs_diff_k_cache"] == pytest.approx(2e-3)
+    assert by_dtype["bf16"]["worst_q_impl"] == "compile"
+    assert by_dtype["bf16"]["n"] == 2
+    assert by_dtype["fp32"]["atol"] == pytest.approx(1e-6)
+
+
+def test_headroom_is_the_worst_of_q_and_k_against_atol():
+    d = numerical_deltas([delta_row("eager", 2e-3, 4e-3, atol=8e-3)])[0]
+    assert d["headroom_pct"] == pytest.approx(50.0)
+
+
+def test_rows_that_did_not_validate_contribute_no_deltas():
+    """A FAIL row carries real deltas, but they describe a wrong implementation; folding them
+    into the passing distribution would report another impl's bug as this one's precision."""
+    assert numerical_deltas([delta_row("broken", 9.9, 9.9, validation="FAIL")]) == []
+
+
+def test_a_csv_without_delta_columns_omits_the_section(tmp_path):
+    """v3 predates these columns; the summariser must not report absent deltas as zero."""
+    base = write_csv(tmp_path, [row("eager", 1.0), row("compile", 0.5)])
+    text = render_markdown(build_summary(base, {}, None))
+    assert numerical_deltas(read_rows(base)) == []
+    assert "Numerical deltas" not in text
+
+
+def test_the_delta_table_reaches_the_markdown(tmp_path):
+    base = write_delta_csv(tmp_path, [delta_row("eager", 1e-3, 2e-3)])
+    text = render_markdown(build_summary(base, {}, None))
+    assert "Numerical deltas against the oracle" in text
+    assert "% of atol" in text
+
+
+def test_a_passing_row_contradicting_the_gate_is_called_out(tmp_path):
+    """v_byte_exact False on a validation=pass row means the gate and the columns disagree."""
+    base = write_delta_csv(tmp_path, [delta_row("eager", 1e-3, 1e-3, v_exact=False)])
+    text = render_markdown(build_summary(base, {}, None))
+    assert "which is a bug in one of them" in text

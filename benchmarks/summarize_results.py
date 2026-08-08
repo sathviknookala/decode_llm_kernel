@@ -156,6 +156,41 @@ def bandwidth_column_sanity(rows):
             "scattered": top("pct_of_scattered_write_bw")}
 
 
+def numerical_deltas(rows):
+    """Worst observed rotation error per dtype, against the tolerance that admitted it.
+
+    Headroom divides by atol alone, ignoring allclose's rtol|b| term, so it overstates how
+    close a row came to failing -- a conservative direction. Rows predating the delta columns
+    yield nothing, and the section is omitted rather than reported as zero.
+    """
+    out = []
+    by_dtype = {}
+    for r in rows:
+        if r.get("validation") != "pass" or not r.get("max_abs_diff_q"):
+            continue
+        by_dtype.setdefault(r["dtype_label"], []).append(r)
+    for dtype, group in by_dtype.items():
+        worst_q = max(group, key=lambda r: float(r["max_abs_diff_q"]))
+        worst_k = max(group, key=lambda r: float(r["max_abs_diff_k_cache"]))
+        atol = float(worst_q["tolerance_atol"])
+        out.append({
+            "dtype_label": dtype,
+            "n": len(group),
+            "atol": atol,
+            "rtol": float(worst_q["tolerance_rtol"]),
+            "max_abs_diff_q": float(worst_q["max_abs_diff_q"]),
+            "max_abs_diff_k_cache": float(worst_k["max_abs_diff_k_cache"]),
+            "headroom_pct": 100.0 * max(float(worst_q["max_abs_diff_q"]),
+                                        float(worst_k["max_abs_diff_k_cache"])) / atol,
+            "worst_q_impl": worst_q["impl"],
+            "worst_q_config": f"{worst_q['head_label']}_b{worst_q['num_requests']}",
+            "v_byte_exact": all(r["v_byte_exact"] in ("True", True) for r in group),
+            "unaddressed_slots_intact": all(
+                r["unaddressed_slots_intact"] in ("True", True) for r in group),
+        })
+    return sorted(out, key=lambda d: -d["headroom_pct"])
+
+
 AMDAHL_GATE_MODE = "hf_static_graph"
 # Pre-registered before the run. Applied to the op_removed saving at the most operator-favourable
 # b=32 configuration, which is the largest saving any fused kernel could realize.
@@ -318,6 +353,7 @@ def build_summary(csv_path, env, profile_summary, amdahl_csv=None):
         "graph_launch_share": graph_launch_share(rows),
         "head_dim_response": {"context": head_ctx, "rows": heads},
         "bandwidth_columns": bandwidth_column_sanity(rows),
+        "numerical_deltas": numerical_deltas(rows),
         "ragged_uniform": ragged_uniform_ratio(rows),
         "serving_layout": serving_layout_cost(rows),
         "launch_structure": launch_structure(profile_summary),
@@ -401,6 +437,28 @@ def render_markdown(s):
     out += _table(["layout", "request mapping", "impl", "ratio", "pairs"],
                   [[r["layout"], r["request_mapping"], r["impl"],
                     f"{r['median_ratio']:.3f}", r["n"]] for r in s["serving_layout"]])
+
+    if s.get("numerical_deltas"):
+        out += ["", "## Numerical deltas against the oracle", "",
+                "The locked dtype policy requires reporting deltas, not just pass/fail. Headroom "
+                "is the worst delta as a percentage of `atol`, ignoring allclose's `rtol|b|` "
+                "term -- so a row is further from failing than its headroom suggests.", ""]
+        out += _table(["dtype", "rows", "atol", "max |dq|", "max |dk_cache|", "headroom",
+                       "worst"],
+                      [[d["dtype_label"], d["n"], f"{d['atol']:.0e}",
+                        f"{d['max_abs_diff_q']:.2e}", f"{d['max_abs_diff_k_cache']:.2e}",
+                        f"{d['headroom_pct']:.1f}% of atol",
+                        f"{d['worst_q_impl']} {d['worst_q_config']}"]
+                       for d in s["numerical_deltas"]])
+        broken = [d for d in s["numerical_deltas"]
+                  if not (d["v_byte_exact"] and d["unaddressed_slots_intact"])]
+        if broken:
+            out += ["", "**A passing row reports V as not byte-exact or an unaddressed slot as "
+                    "modified -- the gate and these columns disagree, which is a bug in one of "
+                    f"them.** Affected dtypes: {', '.join(d['dtype_label'] for d in broken)}."]
+        else:
+            out += ["", "Across every timed row V lands byte-exact and no unaddressed cache slot "
+                    "is modified, so the deltas above are pure rotation arithmetic."]
 
     am = s.get("amdahl", {})
     if am.get("gate"):
