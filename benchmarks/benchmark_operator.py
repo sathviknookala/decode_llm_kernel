@@ -24,7 +24,12 @@ from benchmarks.benchmark_utils import (
     write_csv,
     write_json,
 )
-from benchmarks.impls import DEFAULT_IMPLS, IMPL_LABELS, resolve_impls
+from benchmarks.impls import (
+    DEFAULT_IMPLS,
+    IMPL_LABELS,
+    inductor_cudagraph_skips,
+    resolve_impls,
+)
 from benchmarks.validation import validate_candidate
 from benchmarks.workload import (
     Config,
@@ -129,11 +134,19 @@ def run_config(cfg, device, args_ns, bw_ref_gbps, specs, scattered_ref_gbps=None
     position_sets = build_position_sets(cfg, seed, device)
 
     for spec in specs:
-        base = {"impl": spec.label, **cfg.as_row(), "seed": seed}
+        # In-row, not just env.json: with mode variants in one sweep a single run-level setting
+        # no longer describes every row, which is how validation_cases went wrong in v2.
+        base = {"impl": spec.label, **cfg.as_row(), "seed": seed,
+                "compile_mode": "", "compile_backend": "", "inductor_cudagraph_skips": ""}
         runner = None
         try:
+            spec_mode, spec_backend = spec.resolve(args_ns.compile_mode, args_ns.compile_backend)
+            base.update(compile_mode=spec_mode or "", compile_backend=spec_backend or "")
+            skips_before = inductor_cudagraph_skips()
             runner = spec.build(args_ns.compile_mode, args_ns.compile_backend)
             report = validate_candidate(runner, cfg, device, seed)
+            if spec_backend is not None:
+                base["inductor_cudagraph_skips"] = inductor_cudagraph_skips() - skips_before
         except Exception as e:  # noqa: BLE001 -- a build or capture failure is a result, not a crash
             print(f"  ERROR  {spec.label:14s} {cfg.label()}: {type(e).__name__}: {e}",
                   flush=True)
@@ -225,7 +238,9 @@ def _run_benchmark(args, device, specs, modes, clock_status):
                   f"({fp_gb:.1f} GB/set x {PEAK_CACHE_SETS}) > "
                   f"{args.footprint_budget_gb} GB budget", flush=True)
             all_rows.append({"impl": "skipped", **cfg.as_row(), "seed": args.seed,
+                             "compile_mode": "", "compile_backend": "",
                              "validation": "not-run",
+                             "inductor_cudagraph_skips": "",
                              "validation_detail": f"peak cache {peak_gb:.1f}GB > budget",
                              **_blank_numerics(), **_blank_metrics()})
             continue

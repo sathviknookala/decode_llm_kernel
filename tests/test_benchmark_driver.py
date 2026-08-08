@@ -68,6 +68,10 @@ def test_capture_failure_becomes_an_error_row():
         label = "graph_broken"
 
         @staticmethod
+        def resolve(*_):
+            return None, None
+
+        @staticmethod
         def build(*_):
             def fail(*_):
                 raise RuntimeError("capture permission denied")
@@ -105,10 +109,49 @@ def test_passing_rows_carry_the_measured_deltas_as_columns():
     assert row["unaddressed_slots_intact"] is True
 
 
+def test_rows_carry_the_compile_settings_they_actually_ran_under():
+    """With mode variants in one sweep, a run-level setting in env.json no longer describes
+    every row."""
+    args = SimpleNamespace(seed=SEED, compile_mode="max-autotune-no-cudagraphs",
+                           compile_backend="inductor", warmup=1, iters=1)
+    rows = {r["impl"]: r for r in
+            run_config(CFG, "cuda", args, None, resolve_impls(["eager", "compile"]))}
+    assert rows["compile"]["compile_mode"] == "max-autotune-no-cudagraphs"
+    assert rows["compile"]["compile_backend"] == "inductor"
+    assert rows["eager"]["compile_mode"] == ""
+
+
+def test_a_reduce_overhead_row_records_that_inductor_declined_cudagraphs():
+    """reduce-overhead does not get cudagraphs here: inductor refuses them on mutated inputs,
+    and this operation mutates k_cache and v_cache by definition. Without the counter the row
+    would read as a cudagraph measurement while running the ordinary compiled path -- and it is
+    also why GraphRunner's manual capture exists."""
+    args = SimpleNamespace(seed=SEED, compile_mode=None, compile_backend="inductor",
+                           warmup=1, iters=1)
+    rows = {r["impl"]: r for r in run_config(
+        CFG, "cuda", args, None,
+        resolve_impls(["compile", "compile_reduce_overhead", "eager"]))}
+    assert rows["compile_reduce_overhead"]["inductor_cudagraph_skips"] >= 1
+    assert rows["compile"]["inductor_cudagraph_skips"] == 0
+    assert rows["eager"]["inductor_cudagraph_skips"] == ""
+
+
+def test_a_spec_that_cannot_run_under_the_requested_mode_is_an_error_row():
+    args = SimpleNamespace(seed=SEED, compile_mode="reduce-overhead",
+                           compile_backend="inductor", warmup=1, iters=1)
+    row = run_config(CFG, "cuda", args, None, resolve_impls(["graph_compile"]))[0]
+    assert row["validation"] == "ERROR"
+    assert "cannot be captured" in row["validation_detail"]
+
+
 def test_error_rows_leave_the_delta_columns_blank_rather_than_zero():
     """A zero delta on a row that never validated would read as a perfect match."""
     class FailingSpec:
         label = "graph_broken"
+
+        @staticmethod
+        def resolve(*_):
+            return None, None
 
         @staticmethod
         def build(*_):

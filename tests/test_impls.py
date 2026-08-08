@@ -5,6 +5,7 @@ import torch
 
 from benchmarks import positions as pos
 from benchmarks.impls import (
+    CUDAGRAPH_MODES,
     DEFAULT_IMPLS,
     IMPL_LABELS,
     IMPL_SPECS,
@@ -12,6 +13,8 @@ from benchmarks.impls import (
     GraphRunner,
     resolve_impls,
 )
+
+BY_LABEL = {s.label: s for s in IMPL_SPECS}
 from benchmarks.validation import validate_candidate
 from benchmarks.workload import Config, build_op_args, build_position_sets
 
@@ -19,9 +22,39 @@ CFG = Config("mha", 8, 8, 64, 4, 128, "fp32", pos.RAGGED)
 SEED = 1234
 
 
-def test_labels_are_unique_and_default_covers_the_registry():
+def test_labels_are_unique_and_the_default_is_the_baseline_ladder():
+    """The default is no longer the whole registry: the mode variants recompile per config and
+    would multiply a sweep's wall clock, so they are opt-in via --impls."""
     assert len(set(IMPL_LABELS)) == len(IMPL_LABELS)
-    assert set(DEFAULT_IMPLS) == set(IMPL_LABELS)
+    assert set(DEFAULT_IMPLS) == {"eager", "compile", "graph_eager", "graph_compile"}
+    assert set(DEFAULT_IMPLS).issubset(IMPL_LABELS)
+
+
+def test_a_specs_own_mode_wins_over_the_runs():
+    spec = BY_LABEL["compile_max_autotune"]
+    assert spec.resolve(None, "inductor")[0] == "max-autotune-no-cudagraphs"
+    assert spec.resolve("reduce-overhead", "inductor")[0] == "max-autotune-no-cudagraphs"
+
+
+def test_an_unpinned_spec_takes_the_runs_mode():
+    assert BY_LABEL["compile"].resolve("max-autotune", "inductor") == ("max-autotune", "inductor")
+
+
+def test_eager_reports_no_compile_settings():
+    """Recording the run's compile mode on an eager row would invent provenance it never used."""
+    assert BY_LABEL["eager"].resolve("max-autotune", "aot_eager") == (None, None)
+    assert BY_LABEL["graph_eager"].resolve("max-autotune", "aot_eager") == (None, None)
+
+
+@pytest.mark.parametrize("mode", ["reduce-overhead", "max-autotune"])
+def test_inductors_own_cudagraphs_are_refused_inside_graph_capture(mode):
+    """Capturing a graph whose body already replays an inductor graph measures nesting, not
+    the operator. The registry's own graph specs must therefore never pin such a mode."""
+    with pytest.raises(ValueError, match="cannot be captured"):
+        BY_LABEL["graph_compile"].resolve(mode, "inductor")
+    for spec in IMPL_SPECS:
+        if spec.graph:
+            assert spec.mode not in CUDAGRAPH_MODES
 
 
 def test_every_spec_declares_a_known_base():

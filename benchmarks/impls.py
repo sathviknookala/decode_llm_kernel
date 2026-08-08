@@ -12,6 +12,10 @@ COMPILE = "compile"
 BASES = (EAGER, COMPILE)
 GRAPH_WARMUP = 3
 
+# Modes that turn on inductor's own CUDA graphs. Wrapping one in GraphRunner would capture a
+# graph whose body already replays a graph, so a spec cannot ask for both.
+CUDAGRAPH_MODES = ("reduce-overhead", "max-autotune")
+
 
 def eager_impl():
     return fused_rope_kv_append_ref
@@ -25,6 +29,14 @@ def compile_impl(mode=None, backend="inductor"):
     if mode:
         kwargs["mode"] = mode
     return torch.compile(fused_rope_kv_append_ref, **kwargs)
+
+
+def inductor_cudagraph_skips():
+    """Times inductor declined to apply its own CUDA graphs. This operation mutates its cache
+    arguments, which is exactly what that path refuses, so a `reduce-overhead` row can be an
+    ordinary compiled row wearing a cudagraph label."""
+    from torch._dynamo.utils import counters
+    return counters["inductor"].get("cudagraph_skips", 0)
 
 
 def base_callable(base, mode=None, backend="inductor"):
@@ -130,9 +142,25 @@ class ImplSpec:
     base: str
     graph: bool
     description: str
+    mode: str | None = None
+    backend: str | None = None
+
+    def resolve(self, mode=None, backend="inductor"):
+        """A spec's own mode/backend pins it; otherwise it takes the run's. Eager has neither,
+        and reporting the run's compile settings on an eager row would invent provenance."""
+        if self.base == EAGER:
+            return None, None
+        resolved_mode = self.mode if self.mode is not None else mode
+        resolved_backend = self.backend if self.backend is not None else backend
+        if self.graph and resolved_mode in CUDAGRAPH_MODES:
+            raise ValueError(
+                f"{self.label}: mode {resolved_mode!r} enables inductor's own CUDA graphs, which "
+                f"cannot be captured inside GraphRunner; use max-autotune-no-cudagraphs")
+        return resolved_mode, resolved_backend
 
     def build(self, mode=None, backend="inductor"):
-        fn = base_callable(self.base, mode, backend)
+        resolved_mode, resolved_backend = self.resolve(mode, backend)
+        fn = base_callable(self.base, resolved_mode, resolved_backend or "inductor")
         return GraphRunner(fn) if self.graph else DirectRunner(fn)
 
 
@@ -141,10 +169,22 @@ IMPL_SPECS = (
     ImplSpec("compile", COMPILE, False, "reference through torch.compile"),
     ImplSpec("graph_eager", EAGER, True, "eager reference replayed through a CUDA graph"),
     ImplSpec("graph_compile", COMPILE, True, "compiled reference replayed through a CUDA graph"),
+    ImplSpec("compile_max_autotune", COMPILE, False,
+             "torch.compile with coordinate-descent autotuning, no inductor cudagraphs",
+             mode="max-autotune-no-cudagraphs"),
+    ImplSpec("compile_reduce_overhead", COMPILE, False,
+             "torch.compile with inductor's own cudagraph wrapping, for comparison against "
+             "GraphRunner's manual capture",
+             mode="reduce-overhead"),
+    ImplSpec("graph_compile_max_autotune", COMPILE, True,
+             "autotuned compile replayed through a CUDA graph",
+             mode="max-autotune-no-cudagraphs"),
 )
 
 IMPL_LABELS = tuple(s.label for s in IMPL_SPECS)
-DEFAULT_IMPLS = IMPL_LABELS
+# The four rungs the committed baselines are built from. The mode variants are opt-in: each one
+# recompiles per config, and max-autotune's search would multiply a full sweep's wall clock.
+DEFAULT_IMPLS = ("eager", "compile", "graph_eager", "graph_compile")
 
 
 def resolve_impls(labels):
