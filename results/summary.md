@@ -112,6 +112,32 @@ Mirror ratio is **0.275** against a 0.5 cutoff, so the demotion holds for any cu
 
 **Verdict: latency case is dead: pivot Checkpoint C to paged-cache capability**
 
+### Removal against doubling, every mode and configuration
+
+A removal that a doubling does not mirror was not on the critical path. `rope` and `append` split the removal between the two halves.
+
+| mode | b | ctx | full ms | removal | doubling | rope | append | ratio |
+|---|---|---|---|---|---|---|---|---|
+| hf_compile | 32 | 128 | 62.93 | +3.64% | +0.90% | +0.18% | +3.34% | 0.248 |
+| hf_compile | 32 | 256 | 72.43 | +3.20% | +0.44% | +0.32% | +3.11% | 0.136 |
+| hf_compile | 32 | 512 | 90.05 | +2.67% | +0.33% | +0.24% | +2.56% | 0.123 |
+| hf_compile | 8 | 1024 | 50.64 | +3.42% | -0.03% | +0.44% | +3.44% | -0.009 |
+| hf_compile | 1 | 1024 | 28.79 | +5.29% | -0.23% | +0.67% | +5.25% | -0.044 |
+| hf_eager | 32 | 128 | 72.52 | +3.52% | +3.97% | +0.99% | +0.13% | 1.129 |
+| hf_eager | 32 | 256 | 82.87 | +2.19% | +2.32% | +1.10% | +0.92% | 1.056 |
+| hf_eager | 32 | 512 | 107.53 | +1.52% | +1.94% | +0.64% | +0.46% | 1.279 |
+| hf_eager | 8 | 1024 | 58.54 | +2.54% | +2.51% | +1.71% | +0.75% | 0.989 |
+| hf_eager | 1 | 1024 | 32.27 | +3.12% | +5.13% | +1.87% | +0.45% | 1.645 |
+| hf_static_graph | 32 | 128 | 61.95 | +2.96% | +0.81% | +0.03% | +2.67% | 0.275 |
+| hf_static_graph | 32 | 256 | 71.17 | +2.43% | +0.60% | +0.03% | +2.29% | 0.247 |
+| hf_static_graph | 32 | 512 | 88.77 | +2.02% | +0.43% | +0.03% | +1.82% | 0.213 |
+| hf_static_graph | 8 | 1024 | 49.46 | +2.53% | +0.24% | -0.01% | +2.45% | 0.096 |
+| hf_static_graph | 1 | 1024 | 27.89 | +4.29% | +0.20% | -0.28% | +4.17% | 0.046 |
+
+### Positive control
+
+Eager mirror ratio spans 0.99-1.65 over 5 configurations; compiled spans -0.044-0.275 over 10. The control **holds**: `op_doubled` does register serial work where the operation is serial, so a near-zero ratio under compile is a property of the workload rather than an insensitive instrument. Without these eager rows the demotion would rest on a null result.
+
 ## Launch structure (profiler)
 
 | impl | config | kernels/invocation | distinct | device us/invocation |
