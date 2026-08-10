@@ -7,7 +7,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from benchmarks.benchmark_utils import REPO_ROOT, read_env_doc
+from benchmarks.benchmark_utils import REPO_ROOT, read_env_doc, read_run_completeness
 
 MAIN_LAYOUT = ("packed", "identity")
 GRAPH_PAIRS = (("eager", "graph_eager"), ("compile", "graph_compile"))
@@ -334,6 +334,10 @@ def launch_structure(profile_summary):
             for s in profile_summary.get("summaries", [])]
 
 
+def _env_path(csv_path):
+    return os.path.splitext(csv_path)[0] + ".env.json" if csv_path else None
+
+
 def build_summary(csv_path, env, profile_summary, amdahl_csv=None):
     rows = read_rows(csv_path)
     heads, head_ctx = head_dim_response(rows)
@@ -342,8 +346,10 @@ def build_summary(csv_path, env, profile_summary, amdahl_csv=None):
     return {
         "amdahl": {"savings": amdahl, "gate": amdahl_gate(amdahl),
                    "mirror": mirror, "control": amdahl_control_check(mirror),
+                   "complete": read_run_completeness(_env_path(amdahl_csv)),
                    "source_csv": (os.path.relpath(amdahl_csv, REPO_ROOT)
                                   if amdahl_csv and os.path.exists(amdahl_csv) else None)},
+        "complete": read_run_completeness(_env_path(csv_path)),
         "source_csv": os.path.relpath(csv_path, REPO_ROOT),
         "rows_timed": len(rows),
         "environment": {k: env.get(k) for k in
@@ -377,6 +383,12 @@ def render_markdown(s):
         "source files named below -- do not hand-edit.",
         "",
         f"- source: `{s['source_csv']}` ({s['rows_timed']} timed rows)",
+        *(["",
+           "> **This CSV is from a run that did not finish.** Its provenance file records "
+           "`complete: false`, so the configurations below are whatever the run reached before "
+           "it stopped, not the matrix it was asked for. Every number here is derived from a "
+           "truncated sweep -- re-run before quoting any of it."]
+          if s.get("complete") is False else []),
         f"- device: {env.get('gpu_name')} | torch {env.get('torch_version')} | "
         f"nvcc {env.get('cuda_toolkit_version_nvcc')}",
         f"- provenance: `{(env.get('git_sha') or '')[:12]}`{dirty} at {env.get('timestamp_utc')}",
@@ -467,6 +479,11 @@ def render_markdown(s):
                 f"Source: `{am['source_csv']}`. Substitution ablation on a real decode loop -- "
                 "`op_removed` deletes RoPE and the cache write (and their launches), so its "
                 "saving is the upper bound on a fused kernel.", ""]
+        if am.get("complete") is False:
+            out += ["> **The gate below is derived from a run that did not finish.** Whether "
+                    "the pre-registered gate configuration was among the ones it reached is "
+                    "not something this table can tell you -- check the row count against the "
+                    "requested matrix before treating the verdict as measured.", ""]
         by_mode = {}
         for r in am["savings"]:
             if r["rung"] == "op_removed":

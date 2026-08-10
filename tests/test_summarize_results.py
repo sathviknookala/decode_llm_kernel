@@ -2,6 +2,7 @@ import csv
 
 import pytest
 
+from benchmarks.benchmark_utils import write_json
 from benchmarks.summarize_results import (
     bandwidth_column_sanity,
     build_summary,
@@ -354,6 +355,7 @@ def test_the_gate_carries_whether_its_two_inputs_were_resolved(tmp_path):
 
 # --- the positive control -----------------------------------------------------------------
 
+from benchmarks.benchmark_utils import write_json
 from benchmarks.summarize_results import (
     numerical_deltas,
     read_rows,  # noqa: E402
@@ -477,3 +479,34 @@ def test_a_passing_row_contradicting_the_gate_is_called_out(tmp_path):
     base = write_delta_csv(tmp_path, [delta_row("eager", 1e-3, 1e-3, v_exact=False)])
     text = render_markdown(build_summary(base, {}, None))
     assert "which is a bug in one of them" in text
+
+
+def test_a_finished_run_carries_no_incompleteness_warning(tmp_path):
+    base = write_csv(tmp_path, [row("eager", 1.0), row("compile", 0.5)])
+    write_json(base.replace(".csv", ".env.json"), {"environment": {}, "complete": True})
+    text = render_markdown(build_summary(base, {}, None))
+    assert "did not finish" not in text
+
+
+def test_an_unfinished_run_says_so_at_the_top(tmp_path):
+    """A killed run's rows are whatever it reached, not the matrix it was asked for."""
+    base = write_csv(tmp_path, [row("eager", 1.0), row("compile", 0.5)])
+    write_json(base.replace(".csv", ".env.json"), {"environment": {}, "complete": False})
+    text = render_markdown(build_summary(base, {}, None))
+    assert "did not finish" in text
+    assert "re-run before quoting" in text
+
+
+def test_an_unfinished_amdahl_run_warns_on_the_gate(tmp_path):
+    base = write_csv(tmp_path, [row("eager", 1.0), row("compile", 0.5)])
+    amdahl = _both_modes(tmp_path, 3.0, 0.3)
+    write_json(amdahl.replace(".csv", ".env.json"), {"environment": {}, "complete": False})
+    text = render_markdown(build_summary(base, {}, None, amdahl))
+    assert "gate below is derived from a run that did not finish" in text
+
+
+def test_a_csv_predating_the_flag_is_not_called_unfinished(tmp_path):
+    """Every committed artifact predates the flag; warning on all of them would be noise."""
+    base = write_csv(tmp_path, [row("eager", 1.0), row("compile", 0.5)])
+    assert build_summary(base, {}, None)["complete"] is None
+    assert "did not finish" not in render_markdown(build_summary(base, {}, None))
