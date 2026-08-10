@@ -333,6 +333,36 @@ def read_env_doc(path):
     return doc if "timestamp_utc" in doc else {}
 
 
+def bracketed(rungs):
+    """A ladder with its first rung repeated at the end.
+
+    Measured once, the baseline rung is always the first thing a configuration times, so
+    "the first rung is slow" and "the baseline rung is special" produce the same number and
+    the ladder cannot tell them apart. Measured on this rig that ambiguity was worth up to
+    25% -- larger than most effects these ladders are built to detect.
+    """
+    rungs = list(rungs)
+    return rungs + rungs[:1] if rungs else rungs
+
+
+def ordering_drift(rows, value_col, *, group_col="impl", rung_col="rung_index"):
+    """Closing baseline rung against the opening one, per group, written onto every row.
+
+    Both hold everything except position in the run fixed, so anything off 1.0 is drift over
+    the configuration -- and it bounds how much of any other ratio ordering alone explains.
+    """
+    for group in {r[group_col] for r in rows}:
+        members = sorted((r for r in rows if r[group_col] == group),
+                         key=lambda r: r[rung_col])
+        baselines = [r for r in members if r.get("is_baseline_rung")]
+        drift = ""
+        if len(baselines) > 1 and baselines[0][value_col]:
+            drift = baselines[-1][value_col] / baselines[0][value_col]
+        for r in members:
+            r["ordering_drift"] = drift
+    return rows
+
+
 def read_run_completeness(path):
     """Whether the run that produced this env.json reached its end.
 

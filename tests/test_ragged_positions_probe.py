@@ -78,6 +78,7 @@ def test_the_ladder_drops_rungs_wider_than_the_cache():
 
 def _rung(impl, mode, idx, ms):
     return {"impl": impl, "tensor_mode": mode, "rung_index": idx,
+            "is_baseline_rung": mode == SHARED,
             "device_median_ms": ms * 2, "amortized_call_ms": ms}
 
 

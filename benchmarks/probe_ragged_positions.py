@@ -10,8 +10,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from benchmarks import positions as pos
 from benchmarks.benchmark_utils import (
     REPO_ROOT,
+    bracketed,
     cache_footprint_bytes,
     env_metadata,
+    ordering_drift,
     summarize_device_samples,
     time_amortized_call,
     time_device_events,
@@ -76,10 +78,8 @@ def rungs(cache_alloc_len):
     effect of the tensor being shared -- so without the repeat every ratio here has an
     ordering confound sitting underneath it.
     """
-    out = [(1, SHARED)]
-    out += [(s, DISTINCT) for s in SPREAD_LADDER if s <= cache_alloc_len]
-    out += [(1, SHARED)]
-    return out
+    return bracketed([(1, SHARED)]
+                     + [(s, DISTINCT) for s in SPREAD_LADDER if s <= cache_alloc_len])
 
 
 def probe(cfg, specs, device, seed, warmup, iters, n_sets, fresh_args=False):
@@ -104,6 +104,7 @@ def probe(cfg, specs, device, seed, warmup, iters, n_sets, fresh_args=False):
             rows.append({
                 **cfg.as_row(), "impl": spec.label, "spread": spread,
                 "tensor_mode": tensor_mode, "rung_index": rung_index,
+                "is_baseline_rung": tensor_mode == SHARED,
                 "position_sets": n_sets, "fresh_args": fresh_args,
                 "distinct_slots_per_request": min(spread, n_sets),
                 "device_median_ms": stats["device_median_ms"],
@@ -131,22 +132,15 @@ def with_ratios(rows):
     and it is the amount of any other ratio in the config that ordering alone can explain.
     """
     def opening(impl):
-        shared = [r for r in rows if r["impl"] == impl and r["tensor_mode"] == SHARED]
+        shared = [r for r in rows if r["impl"] == impl and r["is_baseline_rung"]]
         return min(shared, key=lambda r: r["rung_index"]) if shared else None
-
-    def closing(impl):
-        shared = [r for r in rows if r["impl"] == impl and r["tensor_mode"] == SHARED]
-        return max(shared, key=lambda r: r["rung_index"]) if len(shared) > 1 else None
 
     for r in rows:
         b = opening(r["impl"])
         for col in ("device_median_ms", "amortized_call_ms"):
             r[f"{col.replace('_ms', '')}_ratio"] = (
                 r[col] / b[col] if b and b[col] else "")
-        last = closing(r["impl"])
-        r["ordering_drift"] = (last["amortized_call_ms"] / b["amortized_call_ms"]
-                               if last and b and b["amortized_call_ms"] else "")
-    return rows
+    return ordering_drift(rows, "amortized_call_ms")
 
 
 def main():
