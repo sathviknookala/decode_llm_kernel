@@ -6,6 +6,8 @@ measure the step. `op_removed` is the upper bound on a fused kernel's win -- it 
 operation's launches as well as its compute, which is what a fused kernel also does.
 """
 import argparse
+import csv
+import json
 import os
 import statistics as st
 import sys
@@ -148,6 +150,45 @@ def env_path(out):
     return os.path.splitext(out)[0] + ".env.json"
 
 
+def row_key(row):
+    """What identifies one measured point. A skipped config carries no mode, so its rung
+    label alone keys it and a resumed run will not retry a configuration that does not fit."""
+    return (str(row["model_id"]), str(row["batch"]), str(row["ctx"]),
+            str(row.get("mode", "")), str(row["rung"]))
+
+
+def completed_keys(path):
+    """Points already measured in an existing CSV. A row with no timing is not complete: an
+    OOM or a compile failure should be retried rather than inherited."""
+    if not path or not os.path.exists(path):
+        return set()
+    with open(path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    return {row_key(r) for r in rows
+            if r.get("amortized_step_ms") or r.get("rung") == "skipped"}
+
+
+def prior_rows(path):
+    if not path or not os.path.exists(path):
+        return []
+    with open(path, newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def resume_is_safe(path, meta):
+    """Refuse to append onto rows from a different tree. Timings from two source trees in one
+    CSV would be compared against each other by every consumer of the file, silently."""
+    if not os.path.exists(env_path(path)):
+        return True, "no prior provenance"
+    with open(env_path(path)) as f:
+        doc = json.load(f)
+    prior_sha = (doc.get("environment") or {}).get("git_sha")
+    if prior_sha and meta.get("git_sha") and prior_sha != meta["git_sha"]:
+        return False, (f"existing rows were measured at {prior_sha[:12]}, this tree is "
+                       f"{meta['git_sha'][:12]}; resuming would mix two trees in one CSV")
+    return True, "same tree"
+
+
 def _write(args, rows, meta, complete=False):
     """CSV and its provenance move together.
 
@@ -182,6 +223,9 @@ def main():
     ap.add_argument("--mem-budget-gb", type=float, default=22.5)
     ap.add_argument("--activation-reserve-gb", type=float, default=3.0)
     ap.add_argument("--out", default=os.path.join(REPO_ROOT, "results/raw/amdahl_probe.csv"))
+    ap.add_argument("--resume", action="store_true",
+                    help="keep points already measured in --out and fill in the rest; refuses "
+                         "if those rows came from a different tree")
     args = ap.parse_args()
 
     if not torch.cuda.is_available():
@@ -211,6 +255,17 @@ def main():
         "arch_module": arch.module.__name__,
     })
     rows = []
+    done = set()
+    if args.resume:
+        safe, why = resume_is_safe(args.out, meta)
+        if not safe:
+            raise SystemExit(f"--resume refused: {why}")
+        rows = prior_rows(args.out)
+        done = completed_keys(args.out)
+        meta["resumed_onto_rows"] = len(rows)
+        print(f"# resuming: {len(rows)} prior rows, {len(done)} points already measured "
+              f"({why})", flush=True)
+
     for cfg in configs:
         print(f"\n=== {cfg.label()}", flush=True)
         max_cache_len = cfg.ctx + headroom_slots(args)
@@ -231,6 +286,14 @@ def main():
         for mode in args.modes:
             baseline = None
             for rung in rungs:
+                key = row_key({**cfg.as_row(), "mode": mode, "rung": rung.label})
+                if key in done:
+                    prior = next((r for r in rows if row_key(r) == key), None)
+                    if prior and prior.get("rung") == FULL:
+                        baseline = float(prior["amortized_step_ms"])
+                    print(f"  {mode:16s} {rung.label:16s} already measured, skipping",
+                          flush=True)
+                    continue
                 row = measure(model, cfg, mode, rung, args, arch)
                 rows.append(row)
                 ms = row.get("amortized_step_ms")
