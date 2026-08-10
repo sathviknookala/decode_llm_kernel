@@ -10,10 +10,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from benchmarks import positions as pos
 from benchmarks.benchmark_utils import (
     REPO_ROOT,
+    bracketed,
     cache_footprint_bytes,
     env_metadata,
     logical_bytes,
     logical_eff_gbps,
+    ordering_drift,
     summarize_device_samples,
     time_device_events,
     write_csv,
@@ -63,7 +65,8 @@ def probe(cfg, specs, device, seed, warmup, iters, l2_bytes):
     lb = logical_bytes(args.q, args.k, args.v, args.cos, args.sin,
                        args.k_cache, args.v_cache)
     rows = []
-    for n_sets in SLOT_LADDER:
+    ladder = bracketed([n for n in SLOT_LADDER if n <= cfg.cache_alloc_len])
+    for rung_index, n_sets in enumerate(ladder):
         if n_sets > cfg.cache_alloc_len:
             continue
         position_sets = disjoint_slot_sets(cfg.num_requests, cfg.cache_alloc_len,
@@ -77,6 +80,8 @@ def probe(cfg, specs, device, seed, warmup, iters, l2_bytes):
                 stats = summarize_device_samples(time_device_events(thunk, warmup, iters))
             rows.append({
                 **cfg.as_row(), "impl": spec.label, "slot_sets": n_sets,
+                "rung_index": rung_index,
+                "is_baseline_rung": rung_index in (0, len(ladder) - 1),
                 "write_working_set_bytes": ws,
                 "write_working_set_mb": round(ws / 1e6, 2),
                 "l2_multiple": round(ws / l2_bytes, 3),
@@ -93,7 +98,7 @@ def probe(cfg, specs, device, seed, warmup, iters, l2_bytes):
     del args
     gc.collect()
     torch.cuda.empty_cache()
-    return rows
+    return ordering_drift(rows, "device_median_ms")
 
 
 def main():

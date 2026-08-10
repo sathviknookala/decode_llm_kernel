@@ -57,3 +57,22 @@ def test_dtype_is_read_from_the_config_not_assumed():
 def test_sets_land_on_the_requested_device():
     p = disjoint_slot_sets(4, 128, 4, seed=1, device="cuda")[0]
     assert p.is_cuda and p.dtype == torch.long
+
+
+def test_the_slot_ladder_is_bracketed_by_its_first_rung():
+    """The probe's reported effect is under 2 percent; measured elsewhere on this rig, the
+    first-rung artifact alone was worth 25, so the ladder cannot be read without the control."""
+    from benchmarks.benchmark_utils import bracketed
+    ladder = bracketed([n for n in SLOT_LADDER if n <= 2048])
+    assert ladder[0] == ladder[-1] == SLOT_LADDER[0]
+    assert ladder[:-1] == list(SLOT_LADDER)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_the_probe_reports_drift_beside_its_effect():
+    from benchmarks.impls import resolve_impls
+    from benchmarks.probe_l2_residency import probe
+    cfg = Config("mha", 8, 8, 64, 2, 128, "bf16", pos.RAGGED)
+    rows = probe(cfg, resolve_impls(["eager"]), "cuda", 1234, 1, 3, 48 * 1024 ** 2)
+    assert sum(r["is_baseline_rung"] for r in rows) == 2
+    assert all(r["ordering_drift"] != "" for r in rows)

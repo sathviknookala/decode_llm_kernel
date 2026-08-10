@@ -11,8 +11,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from benchmarks.benchmark_utils import (
     REPO_ROOT,
+    bracketed,
     dtype_bytes,
     env_metadata,
+    ordering_drift,
     summarize_device_samples,
     time_amortized_call,
     time_device_events,
@@ -108,10 +110,12 @@ def probe_one(head_cfg, batch, ctx, dtype_label, device, seed, warmup, iters, ar
     label, num_q_heads, num_kv_heads, head_dim = head_cfg
     dtype = DTYPES[dtype_label]
     rows = []
-    for arm in arms:
+    ladder = bracketed(list(arms))
+    for rung_index, arm in enumerate(ladder):
         base = {"head_label": label, "num_q_heads": num_q_heads, "num_kv_heads": num_kv_heads,
                 "head_dim": head_dim, "num_requests": batch, "ctx": ctx,
-                "dtype_label": dtype_label, "arm": arm,
+                "dtype_label": dtype_label, "arm": arm, "rung_index": rung_index,
+                "is_baseline_rung": rung_index in (0, len(ladder) - 1),
                 "cache_read_bytes": cache_read_bytes(batch, num_kv_heads, ctx, head_dim, dtype)}
         try:
             thunk, gqa_path, held = build_arm(arm, batch, num_q_heads, num_kv_heads, ctx,
@@ -137,14 +141,20 @@ def probe_one(head_cfg, batch, ctx, dtype_label, device, seed, warmup, iters, ar
 
 
 def with_layout_ratio(rows):
-    """Every arm against head-major, which is what a consumer would get for free if the cache
-    were written head-major. This ratio is the write-side layout's bill on the read side."""
-    base = next((r for r in rows if r["arm"] == HEAD_MAJOR and r["amortized_call_ms"] != ""),
-                None)
+    """Every arm against the opening head-major rung, which is what a consumer would get for
+    free if the cache were written head-major. This ratio is the write-side layout's bill on
+    the read side.
+
+    head-major is both the baseline and the first arm measured, so the ladder is bracketed
+    with a second head-major rung at the end: without it a drifting run and a real layout cost
+    are the same number, and the effects here are a few percent.
+    """
+    base = next((r for r in sorted(rows, key=lambda r: r["rung_index"])
+                 if r["arm"] == HEAD_MAJOR and r["amortized_call_ms"] != ""), None)
     for r in rows:
         r["vs_head_major"] = (r["amortized_call_ms"] / base["amortized_call_ms"]
                               if base and r["amortized_call_ms"] != "" else "")
-    return rows
+    return ordering_drift(rows, "amortized_call_ms", group_col="head_label")
 
 
 def footprint_gb(batch, num_kv_heads, ctx, head_dim, dtype):

@@ -41,9 +41,12 @@ def test_the_footprint_guard_accounts_for_the_copy_arms_second_buffer():
 
 
 def test_ratios_are_against_head_major():
-    rows = [{"arm": HEAD_MAJOR, "amortized_call_ms": 0.10},
-            {"arm": TOKEN_MAJOR_VIEW, "amortized_call_ms": 0.11},
-            {"arm": TOKEN_MAJOR_COPY, "amortized_call_ms": 0.30}]
+    rows = [{"arm": HEAD_MAJOR, "rung_index": 0, "is_baseline_rung": True,
+             "head_label": "mha", "amortized_call_ms": 0.10},
+            {"arm": TOKEN_MAJOR_VIEW, "rung_index": 1, "is_baseline_rung": False,
+             "head_label": "mha", "amortized_call_ms": 0.11},
+            {"arm": TOKEN_MAJOR_COPY, "rung_index": 2, "is_baseline_rung": False,
+             "head_label": "mha", "amortized_call_ms": 0.30}]
     got = {r["arm"]: r["vs_head_major"] for r in with_layout_ratio(rows)}
     assert got[HEAD_MAJOR] == pytest.approx(1.0)
     assert got[TOKEN_MAJOR_VIEW] == pytest.approx(1.1)
@@ -51,8 +54,10 @@ def test_ratios_are_against_head_major():
 
 
 def test_a_head_major_arm_that_failed_leaves_ratios_blank():
-    rows = [{"arm": HEAD_MAJOR, "amortized_call_ms": ""},
-            {"arm": TOKEN_MAJOR_VIEW, "amortized_call_ms": 0.11}]
+    rows = [{"arm": HEAD_MAJOR, "rung_index": 0, "is_baseline_rung": True,
+             "head_label": "mha", "amortized_call_ms": ""},
+            {"arm": TOKEN_MAJOR_VIEW, "rung_index": 1, "is_baseline_rung": False,
+             "head_label": "mha", "amortized_call_ms": 0.11}]
     assert all(r["vs_head_major"] == "" for r in with_layout_ratio(rows))
 
 
@@ -80,7 +85,7 @@ def test_gqa_configs_take_the_enable_gqa_path_rather_than_materializing_heads():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_every_arm_produces_a_timed_row_with_its_bytes():
     rows = probe_one(("mha", 8, 8, 64), 1, 128, "bf16", "cuda", 1234, 1, 3, ARMS)
-    assert [r["arm"] for r in rows] == list(ARMS)
+    assert [r["arm"] for r in rows][:len(ARMS)] == list(ARMS)
     for r in rows:
         assert r["error"] == ""
         assert r["amortized_call_ms"] > 0
@@ -92,3 +97,25 @@ def test_the_read_floor_arm_needs_no_attention_backend():
     rows = probe_one(("mqa", 71, 1, 64), 1, 128, "bf16", "cuda", 1234, 1, 3, [READ_FLOOR])
     assert rows[0]["gqa_path"] == "n/a"
     assert rows[0]["read_gbps"] > 0
+
+
+def test_the_arm_ladder_is_bracketed_by_its_baseline():
+    """head-major is both the baseline and the first arm measured, so without a closing rung
+    a drifting run and a real layout cost are the same number."""
+    rows = [{"arm": HEAD_MAJOR, "rung_index": 0, "is_baseline_rung": True,
+             "head_label": "mha", "amortized_call_ms": 0.10},
+            {"arm": TOKEN_MAJOR_VIEW, "rung_index": 1, "is_baseline_rung": False,
+             "head_label": "mha", "amortized_call_ms": 0.11},
+            {"arm": HEAD_MAJOR, "rung_index": 2, "is_baseline_rung": True,
+             "head_label": "mha", "amortized_call_ms": 0.09}]
+    got = with_layout_ratio(rows)
+    assert got[1]["vs_head_major"] == pytest.approx(1.1)
+    assert all(r["ordering_drift"] == pytest.approx(0.9) for r in got)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_the_probe_measures_its_baseline_arm_twice():
+    rows = probe_one(("mha", 8, 8, 64), 1, 128, "bf16", "cuda", 1234, 1, 3, ARMS)
+    assert [r["arm"] for r in rows] == list(ARMS) + [HEAD_MAJOR]
+    assert sum(r["is_baseline_rung"] for r in rows) == 2
+    assert rows[0]["ordering_drift"] != ""
