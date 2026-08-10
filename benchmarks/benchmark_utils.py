@@ -333,6 +333,20 @@ def read_env_doc(path):
     return doc if "timestamp_utc" in doc else {}
 
 
+def read_run_completeness(path):
+    """Whether the run that produced this env.json reached its end.
+
+    Returns None when the file predates the flag, which is not the same as False: the
+    committed artifacts were written by code that only wrote provenance on success, so their
+    absence of a flag says nothing either way. Only an explicit False means a partial run.
+    """
+    if not path or not os.path.exists(path):
+        return None
+    with open(path) as f:
+        doc = json.load(f)
+    return doc.get("complete")
+
+
 def write_json(path, obj):
     dirname = os.path.dirname(path)
     if dirname:

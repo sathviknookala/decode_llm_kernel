@@ -144,8 +144,25 @@ def measure(model, cfg, mode, rung, args, arch, device="cuda"):
     return row
 
 
-def _write(args, rows):
+def env_path(out):
+    return os.path.splitext(out)[0] + ".env.json"
+
+
+def _write(args, rows, meta, complete=False):
+    """CSV and its provenance move together.
+
+    The CSV was already written per config so a late crash could not cost the earlier ones,
+    but env.json was written only at the end. A run killed in between therefore left rows
+    from this run beside an env.json describing the previous one -- and nothing in the file
+    said so. `complete` is what tells a reader which case they are holding.
+    """
     write_csv(args.out, rows)
+    write_json(env_path(args.out),
+               {"environment": meta,
+                "complete": complete,
+                "rows_written": len(rows),
+                "rungs": [{"rung": r.label, "description": r.description,
+                           "numerically_valid": r.numerically_valid} for r in RUNGS]})
 
 
 def main():
@@ -188,6 +205,11 @@ def main():
           flush=True)
 
     weights_gb = torch.cuda.memory_allocated() / 1e9
+    meta = env_metadata(0, cli_args=vars(args), extra={
+        "model_id": args.model,
+        "sliding_window_disabled": True,
+        "arch_module": arch.module.__name__,
+    })
     rows = []
     for cfg in configs:
         print(f"\n=== {cfg.label()}", flush=True)
@@ -204,7 +226,7 @@ def main():
                          "layer_types_forced": True, "max_cache_len": max_cache_len,
                          "amortized_step_ms": "", "synchronized_step_ms": "",
                          "error": reason})
-            _write(args, rows)
+            _write(args, rows, meta)
             continue
         for mode in args.modes:
             baseline = None
@@ -223,19 +245,10 @@ def main():
                 print(f"  {mode:16s} {rung.label:16s} {ms:8.3f} ms/step  {saving}"
                       f"  (spread {row['amortized_spread_pct']:.2f}%)", flush=True)
         # written per config: a crash in a later config must not cost the earlier ones
-        _write(args, rows)
+        _write(args, rows, meta)
 
-    meta = env_metadata(0, cli_args=vars(args), extra={
-        "model_id": args.model,
-        "sliding_window_disabled": True,
-        "arch_module": arch.module.__name__,
-    })
     record_gpu_state_end(meta, 0)
-    write_csv(args.out, rows)
-    write_json(os.path.splitext(args.out)[0] + ".env.json",
-               {"environment": meta,
-                "rungs": [{"rung": r.label, "description": r.description,
-                           "numerically_valid": r.numerically_valid} for r in RUNGS]})
+    _write(args, rows, meta, complete=True)
     print(f"\nwrote {args.out}")
 
 
