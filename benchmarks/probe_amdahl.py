@@ -6,8 +6,6 @@ measure the step. `op_removed` is the upper bound on a fused kernel's win -- it 
 operation's launches as well as its compute, which is what a fused kernel also does.
 """
 import argparse
-import csv
-import json
 import os
 import statistics as st
 import sys
@@ -19,12 +17,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from benchmarks import decode_loop as dl
 from benchmarks.benchmark_utils import (
     REPO_ROOT,
+    UNIT_KEY,
+    ResumableRun,
     env_metadata,
     record_gpu_state_end,
     time_amortized_call,
     time_synchronized_call,
-    write_csv,
-    write_json,
 )
 from benchmarks.rung_patches import (
     FULL,
@@ -146,64 +144,21 @@ def measure(model, cfg, mode, rung, args, arch, device="cuda"):
     return row
 
 
-def env_path(out):
-    return os.path.splitext(out)[0] + ".env.json"
+def unit_key(cfg, mode, rung):
+    """One measured point. A skipped config carries no mode, so its rung label alone keys it
+    and a resumed run will not retry a configuration that does not fit."""
+    return f"{cfg.label()}|{mode}|{rung}"
 
 
-def row_key(row):
-    """What identifies one measured point. A skipped config carries no mode, so its rung
-    label alone keys it and a resumed run will not retry a configuration that does not fit."""
-    return (str(row["model_id"]), str(row["batch"]), str(row["ctx"]),
-            str(row.get("mode", "")), str(row["rung"]))
+def point_measured(rows):
+    """A row with no timing is not a result: an OOM or a compile failure should be retried
+    rather than inherited. A budget skip is a result -- it will not fit next time either."""
+    return any(r.get("amortized_step_ms") or r.get("rung") == "skipped" for r in rows)
 
 
-def completed_keys(path):
-    """Points already measured in an existing CSV. A row with no timing is not complete: an
-    OOM or a compile failure should be retried rather than inherited."""
-    if not path or not os.path.exists(path):
-        return set()
-    with open(path, newline="") as f:
-        rows = list(csv.DictReader(f))
-    return {row_key(r) for r in rows
-            if r.get("amortized_step_ms") or r.get("rung") == "skipped"}
-
-
-def prior_rows(path):
-    if not path or not os.path.exists(path):
-        return []
-    with open(path, newline="") as f:
-        return list(csv.DictReader(f))
-
-
-def resume_is_safe(path, meta):
-    """Refuse to append onto rows from a different tree. Timings from two source trees in one
-    CSV would be compared against each other by every consumer of the file, silently."""
-    if not os.path.exists(env_path(path)):
-        return True, "no prior provenance"
-    with open(env_path(path)) as f:
-        doc = json.load(f)
-    prior_sha = (doc.get("environment") or {}).get("git_sha")
-    if prior_sha and meta.get("git_sha") and prior_sha != meta["git_sha"]:
-        return False, (f"existing rows were measured at {prior_sha[:12]}, this tree is "
-                       f"{meta['git_sha'][:12]}; resuming would mix two trees in one CSV")
-    return True, "same tree"
-
-
-def _write(args, rows, meta, complete=False):
-    """CSV and its provenance move together.
-
-    The CSV was already written per config so a late crash could not cost the earlier ones,
-    but env.json was written only at the end. A run killed in between therefore left rows
-    from this run beside an env.json describing the previous one -- and nothing in the file
-    said so. `complete` is what tells a reader which case they are holding.
-    """
-    write_csv(args.out, rows)
-    write_json(env_path(args.out),
-               {"environment": meta,
-                "complete": complete,
-                "rows_written": len(rows),
-                "rungs": [{"rung": r.label, "description": r.description,
-                           "numerically_valid": r.numerically_valid} for r in RUNGS]})
+def rung_sidecar():
+    return {"rungs": [{"rung": r.label, "description": r.description,
+                       "numerically_valid": r.numerically_valid} for r in RUNGS]}
 
 
 def main():
@@ -254,17 +209,8 @@ def main():
         "sliding_window_disabled": True,
         "arch_module": arch.module.__name__,
     })
-    rows = []
-    done = set()
-    if args.resume:
-        safe, why = resume_is_safe(args.out, meta)
-        if not safe:
-            raise SystemExit(f"--resume refused: {why}")
-        rows = prior_rows(args.out)
-        done = completed_keys(args.out)
-        meta["resumed_onto_rows"] = len(rows)
-        print(f"# resuming: {len(rows)} prior rows, {len(done)} points already measured "
-              f"({why})", flush=True)
+    run = ResumableRun(args.out, meta, resume=args.resume, unit_ok=point_measured,
+                       sidecar=rung_sidecar())
 
     for cfg in configs:
         print(f"\n=== {cfg.label()}", flush=True)
@@ -275,43 +221,45 @@ def main():
             reason = (f"weights {weights_gb:.1f} + KV {kv_gb:.1f} + reserve "
                       f"{args.activation_reserve_gb:.1f} = {need:.1f} GB > "
                       f"{args.mem_budget_gb:.1f} GB budget")
+            skip_key = unit_key(cfg, "", "skipped")
+            if run.done(skip_key):
+                print(f"  SKIPPED (already recorded): {reason}", flush=True)
+                continue
             print(f"  SKIPPED: {reason}", flush=True)
-            rows.append({**cfg.as_row(), "mode": "", "rung": "skipped",
-                         "description": "not run", "numerically_valid": False,
-                         "layer_types_forced": True, "max_cache_len": max_cache_len,
-                         "amortized_step_ms": "", "synchronized_step_ms": "",
-                         "error": reason})
-            _write(args, rows, meta)
+            run.add(skip_key, [{**cfg.as_row(), "mode": "", "rung": "skipped",
+                                "description": "not run", "numerically_valid": False,
+                                "layer_types_forced": True, "max_cache_len": max_cache_len,
+                                "amortized_step_ms": "", "synchronized_step_ms": "",
+                                "error": reason}])
             continue
         for mode in args.modes:
             baseline = None
             for rung in rungs:
-                key = row_key({**cfg.as_row(), "mode": mode, "rung": rung.label})
-                if key in done:
-                    prior = next((r for r in rows if row_key(r) == key), None)
-                    if prior and prior.get("rung") == FULL:
+                key = unit_key(cfg, mode, rung.label)
+                if run.done(key):
+                    prior = next((r for r in run.rows
+                                  if r.get(UNIT_KEY) == key and r.get("rung") == FULL), None)
+                    if prior:
                         baseline = float(prior["amortized_step_ms"])
                     print(f"  {mode:16s} {rung.label:16s} already measured, skipping",
                           flush=True)
                     continue
                 row = measure(model, cfg, mode, rung, args, arch)
-                rows.append(row)
                 ms = row.get("amortized_step_ms")
-                if not ms:
-                    continue
-                if rung.label == FULL:
-                    baseline = ms
-                saving = "" if not baseline else f"{(baseline - ms) / baseline * 100:+6.2f}%"
-                row["saving_vs_full_pct"] = (
-                    "" if not baseline else (baseline - ms) / baseline * 100)
-                row["per_layer_us"] = ms * 1000.0 / text.num_hidden_layers
-                print(f"  {mode:16s} {rung.label:16s} {ms:8.3f} ms/step  {saving}"
-                      f"  (spread {row['amortized_spread_pct']:.2f}%)", flush=True)
-        # written per config: a crash in a later config must not cost the earlier ones
-        _write(args, rows, meta)
+                if ms:
+                    if rung.label == FULL:
+                        baseline = ms
+                    saving = "" if not baseline else f"{(baseline - ms) / baseline * 100:+6.2f}%"
+                    row["saving_vs_full_pct"] = (
+                        "" if not baseline else (baseline - ms) / baseline * 100)
+                    row["per_layer_us"] = ms * 1000.0 / text.num_hidden_layers
+                    print(f"  {mode:16s} {rung.label:16s} {ms:8.3f} ms/step  {saving}"
+                          f"  (spread {row['amortized_spread_pct']:.2f}%)", flush=True)
+                # checkpointed per point: a crash must not cost what is already measured
+                run.add(key, [row])
 
-    record_gpu_state_end(meta, 0)
-    _write(args, rows, meta, complete=True)
+    record_gpu_state_end(run.meta, 0)
+    run.finish()
     print(f"\nwrote {args.out}")
 
 

@@ -1,93 +1,73 @@
-import csv
+import pytest
 
-from benchmarks.benchmark_utils import write_json
-from benchmarks.probe_amdahl import (
-    completed_keys,
-    env_path,
-    prior_rows,
-    resume_is_safe,
-    row_key,
-)
+from benchmarks.benchmark_utils import ResumableRun, env_path, write_json
+from benchmarks.decode_loop import DecodeConfig
+from benchmarks.probe_amdahl import point_measured, unit_key
 
-COLUMNS = ["model_id", "batch", "ctx", "mode", "rung", "amortized_step_ms", "error"]
+META = {"git_sha": "a" * 40}
 
 
-def row(rung, ms, *, mode="hf_static_graph", batch=32, ctx=128, error=""):
-    return {"model_id": "m", "batch": str(batch), "ctx": str(ctx), "mode": mode,
-            "rung": rung, "amortized_step_ms": ms, "error": error}
+def cfg(batch=32, ctx=128):
+    return DecodeConfig("org/m", batch, ctx)
 
 
-def write(tmp_path, rows, name="probe.csv"):
-    path = str(tmp_path / name)
-    with open(path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=COLUMNS)
-        w.writeheader()
-        w.writerows(rows)
-    return path
+def row(rung, ms, *, error=""):
+    return {"rung": rung, "amortized_step_ms": ms, "error": error}
 
 
 def test_a_measured_point_is_keyed_by_its_whole_configuration():
-    a = row_key(row("full", "61.9"))
-    assert a != row_key(row("full", "61.9", ctx=256))
-    assert a != row_key(row("full", "61.9", mode="hf_eager"))
-    assert a != row_key(row("op_removed", "60.0"))
+    a = unit_key(cfg(), "hf_static_graph", "full")
+    assert a != unit_key(cfg(ctx=256), "hf_static_graph", "full")
+    assert a != unit_key(cfg(), "hf_eager", "full")
+    assert a != unit_key(cfg(), "hf_static_graph", "op_removed")
 
 
-def test_completed_points_are_skipped_on_resume(tmp_path):
-    path = write(tmp_path, [row("full", "61.9"), row("op_removed", "60.0")])
-    done = completed_keys(path)
-    assert row_key(row("full", "")) in done
-    assert row_key(row("op_doubled", "")) not in done
+def test_a_point_with_a_timing_is_measured():
+    assert point_measured([row("full", 61.9)])
 
 
-def test_a_row_without_a_timing_is_retried_rather_than_inherited(tmp_path):
+def test_a_point_without_a_timing_is_retried_rather_than_inherited():
     """An OOM or a compile failure left a row behind; resuming must re-measure it, not treat
     the failure as a result."""
-    path = write(tmp_path, [row("full", ""), row("op_removed", "60.0", error="OOM")])
-    done = completed_keys(path)
-    assert row_key(row("full", "")) not in done
-    assert row_key(row("op_removed", "")) in done
+    assert not point_measured([row("full", "")])
+    assert point_measured([row("op_removed", "", error="OOM")]) is False
 
 
-def test_a_skipped_config_is_not_retried(tmp_path):
+def test_a_skipped_config_is_not_retried():
     """A configuration that does not fit in the budget will not fit on the next pass either."""
-    path = write(tmp_path, [row("skipped", "", mode="")])
-    assert row_key(row("skipped", "", mode="")) in completed_keys(path)
+    assert point_measured([{"rung": "skipped", "amortized_step_ms": ""}])
 
 
-def test_prior_rows_are_carried_forward_so_resume_appends(tmp_path):
-    path = write(tmp_path, [row("full", "61.9"), row("op_removed", "60.0")])
-    assert len(prior_rows(path)) == 2
+@pytest.fixture
+def partial(tmp_path):
+    """The killed run this was written for: four complete configs and part of a fifth."""
+    out = str(tmp_path / "amdahl_probe.csv")
+    run = ResumableRun(out, META, unit_ok=point_measured)
+    for ctx in (128, 256, 512):
+        for rung in ("full", "op_removed", "op_doubled"):
+            run.add(unit_key(cfg(ctx=ctx), "hf_static_graph", rung), [row(rung, 60.0)])
+    for rung in ("full", "op_removed"):
+        run.add(unit_key(cfg(ctx=1024), "hf_static_graph", rung), [row(rung, 27.9)])
+    return out
 
 
-def test_resuming_across_two_trees_is_refused(tmp_path):
-    """Rows from two source trees in one CSV would be compared against each other by every
-    consumer of the file, with nothing marking the boundary."""
-    path = write(tmp_path, [row("full", "61.9")])
-    write_json(env_path(path), {"environment": {"git_sha": "a" * 40}})
-    ok, why = resume_is_safe(path, {"git_sha": "b" * 40})
-    assert ok is False
-    assert "two trees" in why
+def test_only_the_unmeasured_points_are_re_run(partial):
+    run = ResumableRun(partial, META, resume=True, unit_ok=point_measured)
+    assert len(run.rows) == 11
+    assert run.done(unit_key(cfg(ctx=1024), "hf_static_graph", "op_removed"))
+    assert not run.done(unit_key(cfg(ctx=1024), "hf_static_graph", "op_doubled"))
 
 
-def test_resuming_onto_the_same_tree_is_allowed(tmp_path):
-    path = write(tmp_path, [row("full", "61.9")])
-    write_json(env_path(path), {"environment": {"git_sha": "a" * 40}})
-    assert resume_is_safe(path, {"git_sha": "a" * 40})[0] is True
+def test_the_full_rung_baseline_is_recoverable_from_an_inherited_row(partial):
+    """A resumed config whose `full` rung is inherited still needs its timing: every saving in
+    the file is against it."""
+    run = ResumableRun(partial, META, resume=True, unit_ok=point_measured)
+    key = unit_key(cfg(ctx=1024), "hf_static_graph", "full")
+    prior = next(r for r in run.rows if r["unit_key"] == key and r["rung"] == "full")
+    assert float(prior["amortized_step_ms"]) == 27.9
 
 
-def test_a_fresh_output_path_resumes_trivially(tmp_path):
-    assert completed_keys(str(tmp_path / "absent.csv")) == set()
-    assert resume_is_safe(str(tmp_path / "absent.csv"), {"git_sha": "a"})[0] is True
-
-
-def test_the_partial_run_this_was_written_for_would_resume(tmp_path):
-    """The killed run had four complete configs and part of a fifth; only the unmeasured
-    points should be re-run."""
-    rows = [row(r, "60.0", ctx=c) for c in (128, 256, 512)
-            for r in ("full", "op_removed", "op_doubled")]
-    rows += [row("full", "27.9", ctx=1024), row("op_removed", "26.9", ctx=1024)]
-    path = write(tmp_path, rows)
-    done = completed_keys(path)
-    assert len(done) == 11
-    assert row_key(row("op_doubled", "", ctx=1024)) not in done
+def test_resuming_across_two_trees_is_refused(partial):
+    write_json(env_path(partial), {"environment": {"git_sha": "b" * 40}})
+    with pytest.raises(SystemExit, match="two trees"):
+        ResumableRun(partial, META, resume=True, unit_ok=point_measured)
