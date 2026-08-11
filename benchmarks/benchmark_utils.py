@@ -300,10 +300,29 @@ def _triton_version():
         return None
 
 
-def write_csv(path, rows):
+@contextmanager
+def _atomic(path, **open_kwargs):
+    """Write to a sibling temp file and rename over the target.
+
+    Checkpointing rewrites the whole file once per unit rather than once per run, so a crash
+    inside `open(path, "w")` would destroy every row already measured -- the exact loss resume
+    exists to prevent. os.replace is atomic within a filesystem, so a reader sees the old file
+    or the new one and never a half-written one.
+    """
     dirname = os.path.dirname(path)
     if dirname:
         os.makedirs(dirname, exist_ok=True)
+    tmp = f"{path}.tmp"
+    try:
+        with open(tmp, "w", **open_kwargs) as f:
+            yield f
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def write_csv(path, rows):
     if not rows:
         return
     fields = []
@@ -311,7 +330,7 @@ def write_csv(path, rows):
         for key in r:
             if key not in fields:
                 fields.append(key)
-    with open(path, "w", newline="") as f:
+    with _atomic(path, newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
         w.writerows(rows)
@@ -378,8 +397,96 @@ def read_run_completeness(path):
 
 
 def write_json(path, obj):
-    dirname = os.path.dirname(path)
-    if dirname:
-        os.makedirs(dirname, exist_ok=True)
-    with open(path, "w") as f:
+    with _atomic(path) as f:
         json.dump(obj, f, indent=2, sort_keys=False, default=str)
+
+
+UNIT_KEY = "unit_key"
+RESUME_HELP = ("keep whole units already measured in --out and fill in the rest; refuses if "
+               "those rows came from a different tree")
+
+
+def env_path(out):
+    return os.path.splitext(out)[0] + ".env.json"
+
+
+def read_rows(path):
+    if not path or not os.path.exists(path):
+        return []
+    with open(path, newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def resume_is_safe(path, meta):
+    """Refuse to append onto rows from a different tree. Timings from two source trees in one
+    CSV would be compared against each other by every consumer of the file, silently."""
+    prior_sha = read_env_doc(env_path(path)).get("git_sha")
+    if prior_sha and meta.get("git_sha") and prior_sha != meta["git_sha"]:
+        return False, (f"existing rows were measured at {prior_sha[:12]}, this tree is "
+                       f"{meta['git_sha'][:12]}; resuming would mix two trees in one CSV")
+    return (True, "same tree") if prior_sha else (True, "no prior provenance")
+
+
+class ResumableRun:
+    """Rows on disk at every unit boundary, and a --resume that trusts only whole units.
+
+    The unit is the smallest amount of work a probe can restart without changing what it
+    measures. For a per-point ablation that is one row; for a bracketed ladder it is the whole
+    ladder, because ordering_drift compares the closing baseline rung against the opening one
+    and a restart between them would put a cold process inside the control.
+
+    Completeness is read from the CSV's own unit_key column rather than from the sidecar, so
+    the two files may be written in either order and a crash between them costs nothing: rows
+    only ever reach disk a whole unit at a time.
+    """
+
+    def __init__(self, out, meta, *, resume=False, unit_ok=None, sidecar=None):
+        self.out = out
+        self.meta = dict(meta)
+        self.sidecar = dict(sidecar or {})
+        self.unit_ok = unit_ok or (lambda rows: bool(rows))
+        self.rows = []
+        self.units = set()
+        if resume:
+            self._inherit()
+
+    def _inherit(self):
+        safe, why = resume_is_safe(self.out, self.meta)
+        if not safe:
+            raise SystemExit(f"--resume refused: {why}")
+        groups = {}
+        for r in read_rows(self.out):
+            groups.setdefault(r.get(UNIT_KEY, ""), []).append(r)
+        # A CSV predating this column keys every row to "" and is re-measured whole, which is
+        # the safe direction: no committed artifact carries unit boundaries.
+        for key, rows in groups.items():
+            if key and self.unit_ok(rows):
+                self.units.add(key)
+                self.rows.extend(rows)
+        self.meta["resumed_onto_rows"] = len(self.rows)
+        self.meta["resumed_units"] = len(self.units)
+        print(f"# resuming {self.out}: {len(self.units)} units, {len(self.rows)} rows already "
+              f"measured ({why})", flush=True)
+
+    def done(self, unit_key):
+        return unit_key in self.units
+
+    def add(self, unit_key, rows):
+        """One unit's rows, stamped and checkpointed. Nothing else may write to self.rows."""
+        for r in rows:
+            r[UNIT_KEY] = unit_key
+        self.rows.extend(rows)
+        self.units.add(unit_key)
+        self._checkpoint(False)
+        return rows
+
+    def finish(self, sidecar_extra=None):
+        self.sidecar.update(sidecar_extra or {})
+        self._checkpoint(True)
+
+    def _checkpoint(self, complete):
+        write_csv(self.out, self.rows)
+        write_json(env_path(self.out),
+                   {"environment": self.meta, "complete": complete,
+                    "rows_written": len(self.rows), "units_written": len(self.units),
+                    **self.sidecar})
