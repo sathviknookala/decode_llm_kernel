@@ -51,11 +51,14 @@ the instrument. `amortized_call_ms` is the column to use for those.
 other input pointer, so serving with dynamic positions requires that copy. Presenting replay
 alone would measure a workload that cannot be run.
 
-**The ragged-positions finding changed shape and is not settled.** Compiled b=1 reproduces v2's
-penalty at 1.41x ragged-over-uniform, but `graph_eager` and `graph_compile` show 1.00x at the
-same configurations. The access pattern is identical, so v2's "rewriting one slot kept it
-L2-resident" explanation cannot be the whole story -- but the graph floor may simply be too
-coarse to resolve a difference this small. Treat the mechanism as open.
+**The ragged-positions finding is real in this file and explained by nothing in it.** Compiled b=1
+reproduces v2's penalty at 1.41x ragged-over-uniform, while `eager`, `graph_eager` and
+`graph_compile` all read ~1.00x at the same configurations on identical traffic.
+`raw/ragged_positions_probe.csv` later swept a 2048x range of position spread and found no effect,
+and ruled out tensor identity as well -- so v2's "rewriting one slot kept it L2-resident" is
+refuted and **this column is not measuring a response to positions.** What it *is* measuring is
+still unknown. Note the sweep times uniform before ragged for every config, so run ordering works
+against this effect rather than producing it.
 
 **Strided QKV was measured and costs nothing here.** strided-over-packed device median is 0.993
 at b=1 and 1.002 at b=32. That is a real answer to v2's open question, bounded to those two
@@ -85,9 +88,11 @@ token-major cache only; no paged, fragmented, or head-major layouts (Checkpoint 
 `torch.compile` runs one backend at default mode, recorded in the env JSON. `rope_theta` is
 10000 for every row, which is why anchors at other thetas were not adopted.
 
-**The attention consumer is not modelled at all.** This operator only writes the cache. A layout
-or kernel that speeds writes may slow the attention reads that follow, and that trade-off is
-invisible here.
+**The attention consumer is not modelled in this file.** This operator only writes the cache, so a
+layout or kernel that speeds writes may slow the attention reads that follow. `raw/cache_read_probe.csv`
+now prices the read side separately -- token-major-as-view costs the consumer ~nothing while
+materializing the conversion costs 2.65x -- but nothing times a write and a read in one step, so
+the net effect across a full attention layer is still two numbers added together.
 
 **`cache_alloc_len` is an allocation size.** Flat latency across it is expected and is not
 evidence about launch-bounding -- the operator touches one RoPE row and one K/V slot per request
@@ -120,6 +125,13 @@ a 127x range of cache-write traffic costs 2.0 us, which implies a marginal rate 
 therefore that the stores are not being paid for at memory speed. That is arithmetic over two
 measured medians; confirming *why* still needs Nsight Compute.
 
+**This file predates the ordering control and is therefore uncontrolled.** Its slot ladder was
+measured with the baseline rung first and once, so "the first rung is slow" and "the smallest
+working set is fast" are the same number here. The ragged-positions probe later measured that
+artifact at up to **25%** on this rig -- an order above the +1.9% this file reports. The ladder is
+bracketed now (`benchmark_utils.bracketed`, `ordering_drift`) but has not been re-run, so the
++1.9% and +5.9% figures should be read as upper bounds on a real effect, not as the effect.
+
 ---
 
 ## `raw/graph_floor_probe.csv` (+ `graph_floor_probe.env.json`)
@@ -149,6 +161,67 @@ launch includes that kernel's own cost. It is an upper bound on pure replay over
 serialise, which is why the arithmetic roughly closes, but the derived numbers carry about
 +/- 0.5 us of run-to-run noise -- visible directly in the ladder, where nominally identical rungs
 differ by that much between configurations.
+
+---
+
+## `raw/ragged_positions_probe.csv` and `raw/ragged_positions_probe_fresh.csv`
+
+Two arms, 96 rows each, testing whether the v3 sweep's 1.41x ragged/uniform at compiled b=1 is a
+response to position values, to the tensor object carrying them, or to neither. The `_fresh` file
+is the same ladder with every tensor reallocated per rung, since the sweep timed uniform and
+ragged as separate configs and so gave them separate compiles and allocations.
+
+**It is a negative result, and the negative is the point.** Across a 2048x range of position
+spread no impl departs from its own baseline by more than about 5% once `ordering_drift` is
+subtracted, and spread=1-with-distinct-tensors reads the same as spread=2048. Do not read this as
+"the probe found nothing"; it refutes two specific mechanisms (L2 residency of a rewritten slot,
+and tensor identity) that were the standing explanations.
+
+**It does not explain the sweep's 1.41x.** That number is still unexplained. What this file
+establishes is only that it is not a response to positions. The sweep always times uniform before
+ragged, so its own ordering works against its effect rather than producing it -- which rules
+ordering out as the explanation there too.
+
+**Read `ordering_drift` before any ratio in this file.** It is what caught this probe's own first
+result: `compile` at `mha b=1 fp32` reads 0.760 against its opening baseline and 0.754 against its
+closing one, so the ratio *is* the drift. Four configurations, three impls, one seed, no repeats
+beyond the bracket -- a single drift figure per group, not a distribution.
+
+**`mha b=1 fp32` is where the instrument is loudest**, and it is also the least representative
+configuration in the file: absolute times are ~20-30 us, so a fixed per-run warmup cost is a large
+fraction. Nothing here transfers to b=32.
+
+---
+
+## `raw/cache_read_probe.csv` (+ `cache_read_probe.env.json`)
+
+128 timed rows, no errors, no skips. Four arms -- SDPA on head-major, SDPA on a transposed
+token-major view, the same with the conversion materialized, and a pure read floor -- across four
+head layouts, b in {1, 32} and ctx in {128, 512, 2048, 8192}, bf16 only.
+
+**This is the read side measured alone, not a full attention layer.** It prices the consumer of
+the cache this operator writes. Nothing here times a write and a read in one step, so a layout's
+net effect is still two numbers added together.
+
+**The 1.007 view figure is inside the ordering drift this file cannot report.** Written before the
+ladder was bracketed, so `head_major` is both the baseline and the first arm measured. A later
+smoke run with the bracket showed a closing `head_major` rung at 0.977 on a small configuration,
+i.e. drift of the same size as the effect. The **2.65x median copy penalty is far above any drift
+observed** and stands; the "token-major is free" conclusion is consistent with the data but is not
+separated from drift until a re-run.
+
+**`read_gbps` is not DRAM bandwidth at the narrow end.** Same trap as `pct_of_empirical_bw`: a
+cache that fits in L2 is served from L2, and the small configurations exceed the 553 GB/s
+streaming reference. Quote `ctx=8192`.
+
+**bf16 only, SDPA only, causal masking absent.** No `attn_mask` or `is_causal` is passed -- a
+single decode query attends to all cached keys, which is the decode case, but nothing here covers
+prefill or windowed attention. Which SDPA backend served each arm is not recorded, so a
+transposed view falling back to a slower kernel would be invisible except in the timing.
+
+**GQA rows go through `enable_gqa`**, never by materializing KV heads, so their `cache_read_bytes`
+is the true traffic. An older torch without that argument makes the arm error rather than silently
+change the workload.
 
 ---
 
@@ -242,6 +315,17 @@ saving smaller than the observed spread as unresolved -- but **this CSV predates
 re-run, read 0.81% as *at most about the noise floor*, which is inside the dead band either way,
 rather than as a measured quantity. Regenerate with
 `python benchmarks/probe_amdahl.py --repeats 3`.
+
+**A re-run was attempted and did not survive; nothing from it is in this repo.** It was killed at
+roughly 85% when its session ended, and because probes wrote provenance only at the end, it had
+already overwritten this CSV with 73 partial rows beside a three-day-old `env.json` -- the
+committed file was restored from git and the partial rows were not retained. The gate
+configuration did complete before the kill and indicated the removal resolving above the spread
+while the doubling sat inside it, which is the outcome this section predicts, but **there is no
+surviving artifact and those figures must be reproduced before being quoted.** Two things changed
+as a result: provenance is now written with the first rows and carries `complete`, and `--resume`
+exists. Note `--resume` will *refuse* against this committed CSV, correctly, because its
+`env.json` records an older tree -- so the re-run is a fresh ~2 hour job.
 
 Note also that repeats reuse one compiled instance, so even after a re-run the spread is timing
 noise only. Rungs are separately compiled -- that is what guarantees the patch is traced -- so a
