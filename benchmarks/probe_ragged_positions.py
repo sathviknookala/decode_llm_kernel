@@ -10,6 +10,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from benchmarks import positions as pos
 from benchmarks.benchmark_utils import (
     REPO_ROOT,
+    RESUME_HELP,
+    ResumableRun,
     bracketed,
     cache_footprint_bytes,
     env_metadata,
@@ -17,8 +19,6 @@ from benchmarks.benchmark_utils import (
     summarize_device_samples,
     time_amortized_call,
     time_device_events,
-    write_csv,
-    write_json,
 )
 from benchmarks.impls import resolve_impls
 from benchmarks.workload import Config, build_op_args
@@ -158,6 +158,7 @@ def main():
     ap.add_argument("--footprint-budget-gb", type=float, default=12.0)
     ap.add_argument("--out",
                     default=os.path.join(REPO_ROOT, "results/raw/ragged_positions_probe.csv"))
+    ap.add_argument("--resume", action="store_true", help=RESUME_HELP)
     args = ap.parse_args()
 
     if not torch.cuda.is_available():
@@ -166,27 +167,32 @@ def main():
     device = "cuda"
     print(f"# impls {[s.label for s in specs]} | {args.position_sets} position sets cycled")
 
-    rows = []
+    run = ResumableRun(args.out, env_metadata(0, cli_args=vars(args)), resume=args.resume,
+                       sidecar={"spread_ladder": list(SPREAD_LADDER),
+                                "baseline_rung": {"spread": 1, "tensor_mode": SHARED}})
+    # the two arms are separate experiments over the same configs, so the arm is part of the key
+    arm = "fresh_args" if args.fresh_args else "held_args"
     for cfg in PROBE_CONFIGS:
         fp = cache_footprint_bytes(cfg.num_requests, cfg.cache_alloc_len, cfg.num_kv_heads,
                                    cfg.head_dim, cfg.dtype)
         if fp / 1e9 > args.footprint_budget_gb:
             print(f"SKIPPED {cfg.label()}: one cache set is {fp/1e9:.1f} GB", flush=True)
             continue
+        key = f"{cfg.label()}|{arm}"
+        if run.done(key):
+            print(f"\n=== {cfg.label()}  already measured, skipping", flush=True)
+            continue
         print(f"\n=== {cfg.label()}", flush=True)
-        for r in probe(cfg, specs, device, args.seed, args.warmup, args.iters,
-                       args.position_sets, args.fresh_args):
-            rows.append(r)
+        # the whole ladder is one unit: ordering_drift reads its closing shared rung against
+        # its opening one, and a restart between them would measure the restart
+        for r in run.add(key, probe(cfg, specs, device, args.seed, args.warmup, args.iters,
+                                    args.position_sets, args.fresh_args)):
             print(f"  {r['impl']:14s} spread={r['spread']:>5} {r['tensor_mode']:8s} "
                   f"median={r['device_median_ms']*1000:>7.2f} us "
                   f"amort={r['amortized_call_ms']*1000:>7.2f} us  "
                   f"ratio={r['amortized_call_ratio']:>6.3f} (amortized)", flush=True)
 
-    write_csv(args.out, rows)
-    write_json(os.path.splitext(args.out)[0] + ".env.json",
-               {"environment": env_metadata(0, cli_args=vars(args)),
-                "spread_ladder": list(SPREAD_LADDER),
-                "baseline_rung": {"spread": 1, "tensor_mode": SHARED}})
+    run.finish()
     print(f"\nwrote {args.out}")
 
 

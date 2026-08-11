@@ -11,14 +11,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from benchmarks import positions as pos
 from benchmarks.benchmark_utils import (
     REPO_ROOT,
+    RESUME_HELP,
+    ResumableRun,
     cache_footprint_bytes,
     env_metadata,
     summarize_device_samples,
     time_amortized_call,
     time_device_events,
     time_synchronized_call,
-    write_csv,
-    write_json,
 )
 from benchmarks.impls import GraphRunner, base_callable
 from benchmarks.workload import Config, build_op_args, build_position_sets
@@ -120,24 +120,29 @@ def main():
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--footprint-budget-gb", type=float, default=12.0)
     ap.add_argument("--out", default=os.path.join(REPO_ROOT, "results/raw/graph_floor_probe.csv"))
+    ap.add_argument("--resume", action="store_true", help=RESUME_HELP)
     args = ap.parse_args()
 
     if not torch.cuda.is_available():
         raise SystemExit("CUDA device required")
     device = "cuda"
 
-    rows = []
+    run = ResumableRun(args.out, env_metadata(0, cli_args=vars(args)), resume=args.resume,
+                       sidecar={"stages": [{"stage": n, "description": d} for n, d in STAGES]})
     for cfg in PROBE_CONFIGS:
         fp = cache_footprint_bytes(cfg.num_requests, cfg.cache_alloc_len, cfg.num_kv_heads,
                                    cfg.head_dim, cfg.dtype)
         if fp / 1e9 > args.footprint_budget_gb:
             print(f"SKIPPED {cfg.label()}: one cache set is {fp/1e9:.1f} GB", flush=True)
             continue
+        if run.done(cfg.label()):
+            print(f"\n=== {cfg.label()}  already measured, skipping", flush=True)
+            continue
         print(f"\n=== {cfg.label()}", flush=True)
-        config_rows = probe(cfg, device, args.seed, args.warmup, args.iters)
+        config_rows = run.add(cfg.label(),
+                              probe(cfg, device, args.seed, args.warmup, args.iters))
         base = None
         for r in config_rows:
-            rows.append(r)
             delta = "" if base is None else f"  (+{r['device_median_us'] - base:6.2f})"
             base = base if base is not None else r["device_median_us"]
             print(f"  {r['stage']:26s} event={r['device_median_us']:6.2f} us"
@@ -150,10 +155,7 @@ def main():
               f"{by['graph_compile']['device_median_us']:.2f} us call; "
               f"harness floor {harness:.2f} us", flush=True)
 
-    write_csv(args.out, rows)
-    write_json(os.path.splitext(args.out)[0] + ".env.json",
-               {"environment": env_metadata(0, cli_args=vars(args)),
-                "stages": [{"stage": n, "description": d} for n, d in STAGES]})
+    run.finish()
     print(f"\nwrote {args.out}")
 
 

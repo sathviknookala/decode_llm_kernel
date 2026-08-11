@@ -11,8 +11,11 @@ from benchmarks import positions as pos
 from benchmarks.bandwidth_reference import measure_bandwidth_reference
 from benchmarks.benchmark_utils import (
     REPO_ROOT,
+    RESUME_HELP,
+    ResumableRun,
     cache_footprint_bytes,
     env_metadata,
+    env_path,
     gpu_clock_lock,
     logical_bytes,
     logical_eff_gbps,
@@ -21,8 +24,6 @@ from benchmarks.benchmark_utils import (
     time_amortized_call,
     time_device_events,
     time_synchronized_call,
-    write_csv,
-    write_json,
 )
 from benchmarks.impls import (
     DEFAULT_IMPLS,
@@ -100,6 +101,12 @@ def numerics_row(report):
         "tolerance_atol": report["tolerance"]["atol"],
         "tolerance_rtol": report["tolerance"]["rtol"],
     }
+
+
+def config_ran(rows):
+    """A validation FAIL and a budget skip are results this file records on purpose, so a
+    resume inherits them. A config where every impl raised is not a measurement of anything."""
+    return any(r.get("validation") != "ERROR" for r in rows)
 
 
 def graph_savings(rows):
@@ -225,30 +232,30 @@ def _run_benchmark(args, device, specs, modes, clock_status):
           f"nvcc {meta['cuda_toolkit_version_nvcc']} | git {meta['git_sha']}"
           f"{' (dirty)' if meta['git_dirty'] else ''}")
 
-    all_rows = []
-    n_fail = 0
-    n_skip = 0
+    run = ResumableRun(args.out, meta, resume=args.resume, unit_ok=config_ran)
     for cfg in build_matrix(args.quick, position_modes=modes):
+        if run.done(cfg.label()):
+            print(f"SKIPPED {cfg.label()}: already measured", flush=True)
+            continue
         fp_gb = cache_footprint_bytes(cfg.num_requests, cfg.cache_alloc_len,
                                       cfg.num_kv_heads, cfg.head_dim, cfg.dtype) / 1e9
         peak_gb = PEAK_CACHE_SETS * fp_gb
         if peak_gb > args.footprint_budget_gb:
-            n_skip += 1
             print(f"SKIPPED {cfg.label()}: peak contiguous cache {peak_gb:.1f} GB "
                   f"({fp_gb:.1f} GB/set x {PEAK_CACHE_SETS}) > "
                   f"{args.footprint_budget_gb} GB budget", flush=True)
-            all_rows.append({"impl": "skipped", **cfg.as_row(), "seed": args.seed,
-                             "compile_mode": "", "compile_backend": "",
-                             "validation": "not-run",
-                             "inductor_cudagraph_skips": "",
-                             "validation_detail": f"peak cache {peak_gb:.1f}GB > budget",
-                             **_blank_numerics(), **_blank_metrics()})
+            run.add(cfg.label(),
+                    [{"impl": "skipped", **cfg.as_row(), "seed": args.seed,
+                      "compile_mode": "", "compile_backend": "",
+                      "validation": "not-run",
+                      "inductor_cudagraph_skips": "",
+                      "validation_detail": f"peak cache {peak_gb:.1f}GB > budget",
+                      **_blank_numerics(), **_blank_metrics()}])
             continue
-        for r in run_config(cfg, device, args, bw_ref_gbps, specs, scattered_ref_gbps):
-            all_rows.append(r)
-            if r["validation"] in ("FAIL", "ERROR"):
-                n_fail += 1
-            elif r["device_median_ms"] != "":
+        # checkpointed per config: a crash in a later config must not cost the earlier ones
+        for r in run.add(cfg.label(),
+                         run_config(cfg, device, args, bw_ref_gbps, specs, scattered_ref_gbps)):
+            if r["validation"] == "pass" and r["device_median_ms"] != "":
                 print(f"{r['impl']:14s} {cfg.label():34s} "
                       f"dev_median={r['device_median_ms']:.4f}ms "
                       f"p95={r['device_p95_ms']:.4f}ms "
@@ -256,12 +263,16 @@ def _run_benchmark(args, device, specs, modes, clock_status):
                       f"sync={r['synchronized_call_ms']:.4f}ms "
                       f"logical={r['logical_eff_gbps']:.1f}GB/s", flush=True)
 
-    write_csv(args.out, all_rows)
-    meta_path = os.path.splitext(args.out)[0] + ".env.json"
+    all_rows = run.rows
+    meta_path = env_path(args.out)
+    # counted off the finished rows, not incremented in the loop: on a resume the inherited
+    # configs never pass through it
     n_timed = sum(1 for r in all_rows if r["validation"] == "pass")
+    n_fail = sum(1 for r in all_rows if r["validation"] in ("FAIL", "ERROR"))
+    n_skip = sum(1 for r in all_rows if r["impl"] == "skipped")
     savings = graph_savings(all_rows)
-    record_gpu_state_end(meta, args.device_index)
-    write_json(meta_path, {"environment": meta, "summary": {
+    record_gpu_state_end(run.meta, args.device_index)
+    run.finish({"summary": {
         "rows_total": len(all_rows), "rows_timed": n_timed,
         "validation_failures": n_fail, "configs_skipped": n_skip,
         # Which gate cleared these rows, by name. A count alone let the gate change under a
@@ -308,6 +319,7 @@ def main():
     ap.add_argument("--bandwidth-buffer-mib", type=int, default=512)
     ap.add_argument("--skip-bandwidth-ref", action="store_true")
     ap.add_argument("--out", default=os.path.join(REPO_ROOT, "results/raw/operator_baseline_v2.csv"))
+    ap.add_argument("--resume", action="store_true", help=RESUME_HELP)
     args = ap.parse_args()
 
     if not torch.cuda.is_available():

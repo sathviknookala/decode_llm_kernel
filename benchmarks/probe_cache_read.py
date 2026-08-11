@@ -11,6 +11,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from benchmarks.benchmark_utils import (
     REPO_ROOT,
+    RESUME_HELP,
+    ResumableRun,
     bracketed,
     dtype_bytes,
     env_metadata,
@@ -18,8 +20,6 @@ from benchmarks.benchmark_utils import (
     summarize_device_samples,
     time_amortized_call,
     time_device_events,
-    write_csv,
-    write_json,
 )
 from benchmarks.workload import DTYPES, HEAD_CONFIGS
 
@@ -157,6 +157,16 @@ def with_layout_ratio(rows):
     return ordering_drift(rows, "amortized_call_ms", group_col="head_label")
 
 
+def unit_key(head_label, batch, ctx, dtype_label):
+    return f"{head_label}_b{batch}_ctx{ctx}_{dtype_label}"
+
+
+def ladder_ran(rows):
+    """An unrunnable arm is recorded as a row on purpose, but a ladder where every arm failed
+    is a failure of the config, not a measurement of it."""
+    return any(not r.get("error") for r in rows)
+
+
 def footprint_gb(batch, num_kv_heads, ctx, head_dim, dtype):
     """The copy arm holds the source and its contiguous copy at once."""
     return 2 * cache_read_bytes(batch, num_kv_heads, ctx, head_dim, dtype) / 1e9
@@ -175,6 +185,7 @@ def main():
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--footprint-budget-gb", type=float, default=12.0)
     ap.add_argument("--out", default=os.path.join(REPO_ROOT, "results/raw/cache_read_probe.csv"))
+    ap.add_argument("--resume", action="store_true", help=RESUME_HELP)
     args = ap.parse_args()
 
     if not torch.cuda.is_available():
@@ -187,7 +198,10 @@ def main():
              if not args.head_labels or h[0] in args.head_labels]
     print(f"# arms {args.arms} | enable_gqa available: {supports_enable_gqa()}")
 
-    rows = []
+    run = ResumableRun(args.out, env_metadata(0, cli_args=vars(args)), resume=args.resume,
+                       unit_ok=ladder_ran,
+                       sidecar={"arms": list(args.arms), "ctx_ladder": args.ctxs,
+                                "enable_gqa_available": supports_enable_gqa()})
     for head_cfg in heads:
         for batch in args.batches:
             for ctx in args.ctxs:
@@ -196,22 +210,24 @@ def main():
                     print(f"SKIPPED {head_cfg[0]} b={batch} ctx={ctx}: peak {fp:.1f} GB > "
                           f"{args.footprint_budget_gb} GB budget", flush=True)
                     continue
+                key = unit_key(head_cfg[0], batch, ctx, args.dtype)
+                if run.done(key):
+                    print(f"\n=== {key}  already measured, skipping", flush=True)
+                    continue
                 print(f"\n=== {head_cfg[0]} b={batch} ctx={ctx} {args.dtype} "
                       f"({fp:.2f} GB peak)", flush=True)
-                for r in probe_one(head_cfg, batch, ctx, args.dtype, device, args.seed,
-                                   args.warmup, args.iters, args.arms):
-                    rows.append(r)
+                # the whole ladder is one unit: ordering_drift reads its closing head-major
+                # rung against its opening one, and a restart between them would measure the
+                # restart
+                for r in run.add(key, probe_one(head_cfg, batch, ctx, args.dtype, device,
+                                                args.seed, args.warmup, args.iters, args.arms)):
                     if r["error"]:
                         continue
                     print(f"  {r['arm']:18s} amort={r['amortized_call_ms']*1000:>8.2f} us  "
                           f"{r['read_gbps']:>7.1f} GB/s  vs head-major "
                           f"{r['vs_head_major']:.3f}", flush=True)
 
-    write_csv(args.out, rows)
-    write_json(os.path.splitext(args.out)[0] + ".env.json",
-               {"environment": env_metadata(0, cli_args=vars(args)),
-                "arms": list(args.arms), "ctx_ladder": args.ctxs,
-                "enable_gqa_available": supports_enable_gqa()})
+    run.finish()
     print(f"\nwrote {args.out}")
 
 

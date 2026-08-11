@@ -10,6 +10,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from benchmarks import positions as pos
 from benchmarks.benchmark_utils import (
     REPO_ROOT,
+    RESUME_HELP,
+    ResumableRun,
     bracketed,
     cache_footprint_bytes,
     env_metadata,
@@ -18,8 +20,6 @@ from benchmarks.benchmark_utils import (
     ordering_drift,
     summarize_device_samples,
     time_device_events,
-    write_csv,
-    write_json,
 )
 from benchmarks.impls import resolve_impls
 from benchmarks.workload import Config, build_op_args
@@ -110,6 +110,7 @@ def main():
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--footprint-budget-gb", type=float, default=12.0)
     ap.add_argument("--out", default=os.path.join(REPO_ROOT, "results/raw/l2_residency_probe.csv"))
+    ap.add_argument("--resume", action="store_true", help=RESUME_HELP)
     args = ap.parse_args()
 
     if not torch.cuda.is_available():
@@ -119,25 +120,28 @@ def main():
     l2 = torch.cuda.get_device_properties(device).L2_cache_size
     print(f"# L2 = {l2/1e6:.1f} MB | impls {[s.label for s in specs]}")
 
-    rows = []
+    run = ResumableRun(args.out, env_metadata(0, cli_args=vars(args)), resume=args.resume,
+                       sidecar={"l2_cache_bytes": l2, "slot_ladder": list(SLOT_LADDER)})
     for cfg in PROBE_CONFIGS:
         fp = cache_footprint_bytes(cfg.num_requests, cfg.cache_alloc_len, cfg.num_kv_heads,
                                    cfg.head_dim, cfg.dtype)
         if fp / 1e9 > args.footprint_budget_gb:
             print(f"SKIPPED {cfg.label()}: one cache set is {fp/1e9:.1f} GB", flush=True)
             continue
+        if run.done(cfg.label()):
+            print(f"\n=== {cfg.label()}  already measured, skipping", flush=True)
+            continue
         print(f"\n=== {cfg.label()}  (one cache set {fp/1e9:.2f} GB)", flush=True)
-        for r in probe(cfg, specs, device, args.seed, args.warmup, args.iters, l2):
-            rows.append(r)
+        # the whole ladder is one unit: ordering_drift reads its closing rung against its
+        # opening one, and a restart between them would measure the restart
+        for r in run.add(cfg.label(),
+                         probe(cfg, specs, device, args.seed, args.warmup, args.iters, l2)):
             print(f"  {r['impl']:14s} sets={r['slot_sets']:>4}  "
                   f"writes={r['write_working_set_mb']:>8.2f} MB ({r['l2_multiple']:>6.2f}x L2)  "
                   f"median={r['device_median_ms']*1000:>7.2f} us  "
                   f"{r['logical_eff_gbps']:>7.1f} GB/s", flush=True)
 
-    write_csv(args.out, rows)
-    write_json(os.path.splitext(args.out)[0] + ".env.json",
-               {"environment": env_metadata(0, cli_args=vars(args)),
-                "l2_cache_bytes": l2, "slot_ladder": list(SLOT_LADDER)})
+    run.finish()
     print(f"\nwrote {args.out}")
 
 
