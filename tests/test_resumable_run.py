@@ -148,6 +148,64 @@ def test_a_flat_env_json_still_yields_its_git_sha(tmp_path):
     assert "two trees" in why
 
 
+def args_meta(**cli):
+    return {"git_sha": "a" * 40, "cli_args": {"out": "p.csv", "resume": False,
+                                              "iters": 100, "warmup": 25, **cli}}
+
+
+def test_resuming_under_different_measurement_settings_is_refused(out):
+    """The tree check catches a changed tree; without this, a run killed at --iters 2000 and
+    resumed at --iters 25 produced one CSV holding both, with env.json reporting only 25."""
+    ResumableRun(out, args_meta(), unit_ok=lambda r: True).add("cfg_a", ladder("cfg_a"))
+    with pytest.raises(SystemExit, match="iters 100 -> 25"):
+        ResumableRun(out, args_meta(iters=25), resume=True)
+
+
+def test_the_refusal_names_every_setting_that_moved(out):
+    ResumableRun(out, args_meta()).add("cfg_a", ladder("cfg_a"))
+    with pytest.raises(SystemExit) as e:
+        ResumableRun(out, args_meta(iters=25, warmup=5), resume=True)
+    assert "iters" in str(e.value) and "warmup" in str(e.value)
+
+
+def test_a_new_setting_is_guarded_the_day_it_is_added(out):
+    """Default-deny: an argument nothing has thought about yet still blocks a resume, rather
+    than silently changing what the later rows mean."""
+    ResumableRun(out, args_meta()).add("cfg_a", ladder("cfg_a"))
+    with pytest.raises(SystemExit, match="fresh_args"):
+        ResumableRun(out, args_meta(fresh_args=True), resume=True)
+
+
+def test_the_output_path_and_the_resume_flag_are_not_measurement_settings(out):
+    """The first run is launched without --resume and usually names its own --out; refusing on
+    those would refuse every resume there is."""
+    ResumableRun(out, args_meta()).add("cfg_a", ladder("cfg_a"))
+    resumed = ResumableRun(out, {"git_sha": "a" * 40,
+                                 "cli_args": {"out": "elsewhere.csv", "resume": True,
+                                              "iters": 100, "warmup": 25}}, resume=True)
+    assert resumed.done("cfg_a")
+
+
+def test_a_prior_run_that_recorded_no_arguments_is_not_second_guessed(out):
+    """Absence of a record is not evidence the settings differ, and the committed artifacts
+    predate this check."""
+    ResumableRun(out, {"git_sha": "a" * 40}).add("cfg_a", ladder("cfg_a"))
+    assert ResumableRun(out, args_meta(), resume=True).done("cfg_a")
+
+
+def test_a_resumed_run_can_read_what_the_earlier_one_recorded_about_itself(out):
+    """A reference the inherited rows were scored against has to be recoverable, or the resumed
+    run will derive a second one and the file will carry both."""
+    first = ResumableRun(out, {**args_meta(), "bandwidth_reference": {"reference_gbps": 553.0}})
+    first.add("cfg_a", ladder("cfg_a"))
+    second = ResumableRun(out, args_meta(), resume=True)
+    assert second.prior_meta["bandwidth_reference"]["reference_gbps"] == 553.0
+
+
+def test_a_fresh_run_has_no_prior_provenance_to_read(out):
+    assert ResumableRun(out, args_meta()).prior_meta == {}
+
+
 def test_a_fresh_output_path_resumes_trivially(out):
     run = ResumableRun(out, META, resume=True)
     assert run.rows == []

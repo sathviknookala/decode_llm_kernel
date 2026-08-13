@@ -417,13 +417,35 @@ def read_rows(path):
         return list(csv.DictReader(f))
 
 
+# Everything else is assumed to change what a row means, so a resume refuses on it. Default-deny
+# is the safe direction here: a new flag is guarded the day it is added, and a spurious refusal
+# is loud, while a missed one puts two measurement settings in one CSV silently.
+RESUME_IGNORED_ARGS = ("out", "resume")
+
+
+def _measurement_args(cli_args):
+    return {k: v for k, v in (cli_args or {}).items() if k not in RESUME_IGNORED_ARGS}
+
+
 def resume_is_safe(path, meta):
-    """Refuse to append onto rows from a different tree. Timings from two source trees in one
-    CSV would be compared against each other by every consumer of the file, silently."""
-    prior_sha = read_env_doc(env_path(path)).get("git_sha")
+    """Refuse to append onto rows that were not measured the same way.
+
+    Two trees' timings in one CSV, or two settings of --iters, would be compared against each
+    other by every consumer of the file with nothing marking the boundary. The tree is checked
+    by sha; everything else is checked by the arguments the run was given.
+    """
+    prior = read_env_doc(env_path(path))
+    prior_sha = prior.get("git_sha")
     if prior_sha and meta.get("git_sha") and prior_sha != meta["git_sha"]:
         return False, (f"existing rows were measured at {prior_sha[:12]}, this tree is "
                        f"{meta['git_sha'][:12]}; resuming would mix two trees in one CSV")
+    was, now = _measurement_args(prior.get("cli_args")), _measurement_args(meta.get("cli_args"))
+    if was and now:
+        changed = sorted(k for k in set(was) | set(now) if was.get(k) != now.get(k))
+        if changed:
+            detail = "; ".join(f"{k} {was.get(k)!r} -> {now.get(k)!r}" for k in changed)
+            return False, (f"existing rows were measured with different settings ({detail}); "
+                           f"resuming would mix two measurement settings in one CSV")
     return (True, "same tree") if prior_sha else (True, "no prior provenance")
 
 
@@ -447,6 +469,9 @@ class ResumableRun:
         self.unit_ok = unit_ok or (lambda rows: bool(rows))
         self.rows = []
         self.units = set()
+        # what the run that measured the inherited rows recorded about itself; a resumed run
+        # that re-derives a reference the old rows were scored against would mix two of them
+        self.prior_meta = {}
         if resume:
             self._inherit()
 
@@ -454,6 +479,7 @@ class ResumableRun:
         safe, why = resume_is_safe(self.out, self.meta)
         if not safe:
             raise SystemExit(f"--resume refused: {why}")
+        self.prior_meta = read_env_doc(env_path(self.out))
         groups = {}
         for r in read_rows(self.out):
             groups.setdefault(r.get(UNIT_KEY, ""), []).append(r)
