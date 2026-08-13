@@ -103,6 +103,34 @@ def numerics_row(report):
     }
 
 
+def bandwidth_reference(args, device, run):
+    """Inherited on a resume rather than re-measured.
+
+    pct_of_empirical_bw is computed per row against whichever reference was live when the row
+    was timed. Re-measuring on a resume would score the new rows against a second reference and
+    leave env.json describing only that one, so the file would carry two denominators with
+    nothing marking which rows used which.
+    """
+    if args.skip_bandwidth_ref:
+        return None
+    inherited = run.prior_meta.get("bandwidth_reference")
+    if inherited:
+        print(f"# inherited bandwidth reference from the resumed run: "
+              f"{inherited['reference_gbps']:.1f} GB/s")
+        return inherited
+    bw_ref = measure_bandwidth_reference(device, args.bandwidth_buffer_mib)
+    print(f"# empirical bandwidth reference: {bw_ref['reference_gbps']:.1f} GB/s "
+          f"({bw_ref['copy']['byte_convention']})")
+    if bw_ref["scattered_write_reference_gbps"]:
+        print(f"# scattered-write reference: "
+              f"{bw_ref['scattered_write_reference_gbps']:.1f} GB/s "
+              f"({bw_ref['scattered_write']['byte_convention']})")
+    else:
+        print(f"WARNING: scattered-write reference unavailable: "
+              f"{bw_ref['scattered_write']['error']}", file=sys.stderr)
+    return bw_ref
+
+
 def config_ran(rows):
     """A validation FAIL and a budget skip are results this file records on purpose, so a
     resume inherits them. A config where every impl raised is not a measurement of anything."""
@@ -210,29 +238,16 @@ def _run_benchmark(args, device, specs, modes, clock_status):
         },
     })
 
-    bw_ref = None
-    bw_ref_gbps = None
-    scattered_ref_gbps = None
-    if not args.skip_bandwidth_ref:
-        bw_ref = measure_bandwidth_reference(device, args.bandwidth_buffer_mib)
-        bw_ref_gbps = bw_ref["reference_gbps"]
-        scattered_ref_gbps = bw_ref["scattered_write_reference_gbps"]
-        print(f"# empirical bandwidth reference: {bw_ref_gbps:.1f} GB/s "
-              f"({bw_ref['copy']['byte_convention']})")
-        if scattered_ref_gbps:
-            print(f"# scattered-write reference: {scattered_ref_gbps:.1f} GB/s "
-                  f"({bw_ref['scattered_write']['byte_convention']})")
-        else:
-            print(f"WARNING: scattered-write reference unavailable: "
-                  f"{bw_ref['scattered_write']['error']}", file=sys.stderr)
-    meta["bandwidth_reference"] = bw_ref
-
     print(f"# {meta['gpu_name']} cc{meta['gpu_compute_capability']} | "
           f"torch {meta['torch_version']} | driver {meta['nvidia_driver_version']} | "
           f"nvcc {meta['cuda_toolkit_version_nvcc']} | git {meta['git_sha']}"
           f"{' (dirty)' if meta['git_dirty'] else ''}")
 
     run = ResumableRun(args.out, meta, resume=args.resume, unit_ok=config_ran)
+    bw_ref = bandwidth_reference(args, device, run)
+    bw_ref_gbps = bw_ref["reference_gbps"] if bw_ref else None
+    scattered_ref_gbps = bw_ref["scattered_write_reference_gbps"] if bw_ref else None
+    run.meta["bandwidth_reference"] = bw_ref
     for cfg in build_matrix(args.quick, position_modes=modes):
         if run.done(cfg.label()):
             print(f"SKIPPED {cfg.label()}: already measured", flush=True)

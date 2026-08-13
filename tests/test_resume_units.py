@@ -14,9 +14,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from benchmarks import probe_cache_read, probe_l2_residency, probe_ragged_positions
+from benchmarks import (
+    benchmark_operator,
+    probe_cache_read,
+    probe_l2_residency,
+    probe_ragged_positions,
+)
 from benchmarks.benchmark_operator import config_ran
-from benchmarks.benchmark_utils import UNIT_KEY, read_rows
+from benchmarks.benchmark_utils import UNIT_KEY, ResumableRun, read_rows
 
 BENCHMARKS = ("benchmark_operator", "probe_amdahl", "probe_cache_read", "probe_graph_floor",
               "probe_l2_residency", "probe_ragged_positions")
@@ -62,10 +67,10 @@ def test_the_l2_ladder_is_one_unit(tmp_path, monkeypatch, fake_gpu):
     assert set(per_unit.values()) == {len(probe_l2_residency.SLOT_LADDER) + 1}
 
 
-def test_the_spread_ladder_is_one_unit_and_the_arm_is_part_of_its_key(
-        tmp_path, monkeypatch, fake_gpu):
-    """The two arms are separate experiments over the same configs; keyed by config alone, a
-    --fresh-args run would inherit the held-args rows and measure nothing."""
+def test_the_spread_ladder_is_one_unit_and_names_its_arm(tmp_path, monkeypatch, fake_gpu):
+    """The two arms are separate experiments over the same configs, so the arm is part of the
+    key. --resume across them is refused by the settings guard as well; the key is what keeps
+    them apart if the two arms ever share a file."""
     stub_env(probe_ragged_positions, monkeypatch)
     monkeypatch.setattr(probe_ragged_positions, "probe", lambda cfg, *a, **k: [
         {"impl": "compile", "spread": s, "tensor_mode": m, "device_median_ms": 0.01,
@@ -73,12 +78,56 @@ def test_the_spread_ladder_is_one_unit_and_the_arm_is_part_of_its_key(
         for s, m in probe_ragged_positions.rungs(cfg.cache_alloc_len)])
     out = str(tmp_path / "ragged.csv")
     run_main(probe_ragged_positions, monkeypatch, ["--out", out])
-    held = {r[UNIT_KEY] for r in read_rows(out)}
+    keys = {r[UNIT_KEY] for r in read_rows(out)}
 
-    run_main(probe_ragged_positions, monkeypatch, ["--out", out, "--fresh-args", "--resume"])
-    both = {r[UNIT_KEY] for r in read_rows(out)}
-    assert len(both) == 2 * len(held)
-    assert all(k.endswith("|held_args") or k.endswith("|fresh_args") for k in both)
+    assert len(keys) == len(probe_ragged_positions.PROBE_CONFIGS)
+    assert all(k.endswith("|held_args") for k in keys)
+
+    run_main(probe_ragged_positions, monkeypatch, ["--out", str(tmp_path / "fresh.csv"),
+                                                   "--fresh-args"])
+    fresh = {r[UNIT_KEY] for r in read_rows(str(tmp_path / "fresh.csv"))}
+    assert all(k.endswith("|fresh_args") for k in fresh)
+    assert not (keys & fresh)
+
+
+BW_REF = {"reference_gbps": 553.0, "scattered_write_reference_gbps": 365.0,
+          "copy": {"byte_convention": "rw"}, "scattered_write": {"byte_convention": "w"}}
+
+
+def test_the_sweep_inherits_its_bandwidth_reference_instead_of_re_deriving_it(
+        tmp_path, monkeypatch):
+    """pct_of_empirical_bw is computed per row against whichever reference was live. Measuring
+    a second one on resume would leave two denominators in one CSV and env.json naming one."""
+    calls = []
+
+    def counting_ref(*a, **k):
+        calls.append(1)
+        return dict(BW_REF)
+
+    monkeypatch.setattr(benchmark_operator, "measure_bandwidth_reference", counting_ref)
+    out = str(tmp_path / "sweep.csv")
+    meta = {"git_sha": "a" * 40, "cli_args": {"out": out, "resume": False, "iters": 100}}
+    cli = SimpleNamespace(skip_bandwidth_ref=False, bandwidth_buffer_mib=512)
+
+    first = ResumableRun(out, meta, unit_ok=benchmark_operator.config_ran)
+    first.meta["bandwidth_reference"] = benchmark_operator.bandwidth_reference(cli, "cuda", first)
+    first.add("cfg_a", [{"validation": "pass", "pct_of_empirical_bw": 42.0}])
+    first.finish()
+    assert len(calls) == 1
+
+    second = ResumableRun(out, meta, resume=True, unit_ok=benchmark_operator.config_ran)
+    ref = benchmark_operator.bandwidth_reference(cli, "cuda", second)
+    assert ref["reference_gbps"] == 553.0
+    assert len(calls) == 1, "the reference was re-measured on a resume"
+
+
+def test_skipping_the_bandwidth_reference_still_skips_it_on_a_resume(tmp_path, monkeypatch):
+    monkeypatch.setattr(benchmark_operator, "measure_bandwidth_reference",
+                        lambda *a, **k: pytest.fail("should not be measured"))
+    out = str(tmp_path / "sweep.csv")
+    run = ResumableRun(out, {"git_sha": "a" * 40})
+    cli = SimpleNamespace(skip_bandwidth_ref=True, bandwidth_buffer_mib=512)
+    assert benchmark_operator.bandwidth_reference(cli, "cuda", run) is None
 
 
 def test_the_read_side_ladder_is_one_unit(tmp_path, monkeypatch, fake_gpu):
