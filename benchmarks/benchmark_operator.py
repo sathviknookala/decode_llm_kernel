@@ -28,6 +28,7 @@ from benchmarks.benchmark_utils import (
 from benchmarks.impls import (
     DEFAULT_IMPLS,
     IMPL_LABELS,
+    assert_extension_available,
     inductor_cudagraph_skips,
     resolve_impls,
 )
@@ -143,7 +144,7 @@ def graph_savings(rows):
              if r.get("validation") == "pass" and r.get("device_median_ms") != ""}
     savings = []
     for (impl, key), direct in timed.items():
-        if impl not in ("eager", "compile"):
+        if f"graph_{impl}" not in IMPL_LABELS:
             continue
         graph_impl = f"graph_{impl}"
         graph = timed.get((graph_impl, key))
@@ -346,6 +347,7 @@ def main():
         specs = resolve_impls(args.impls)
     except ValueError as e:
         raise SystemExit(str(e))
+    assert_extension_available(specs)
 
     modes = (pos.UNIFORM, pos.RAGGED) if args.position_mode == "both" else (args.position_mode,)
     with gpu_clock_lock(args.device_index, args.lock_clocks) as clock_status:

@@ -4,12 +4,18 @@ from dataclasses import dataclass
 import torch
 import torch._dynamo
 
+from decode_kernels import cuda
 from decode_kernels.reference import fused_rope_kv_append_ref
 from benchmarks.workload import make_thunk
 
 EAGER = "eager"
 COMPILE = "compile"
-BASES = (EAGER, COMPILE)
+CUDA_SEPARATE = "cuda_separate"
+CUDA_FUSED = "cuda_fused"
+# The custom-kernel rungs. They take no compile mode or backend, for the same reason eager does
+# not: reporting the run's inductor settings on a hand-written kernel would invent provenance.
+CUDA_BASES = (CUDA_SEPARATE, CUDA_FUSED)
+BASES = (EAGER, COMPILE) + CUDA_BASES
 GRAPH_WARMUP = 3
 
 # Modes that turn on inductor's own CUDA graphs. Wrapping one in GraphRunner would capture a
@@ -39,12 +45,34 @@ def inductor_cudagraph_skips():
     return counters["inductor"].get("cudagraph_skips", 0)
 
 
+def cuda_impl(base):
+    from decode_kernels.cuda import ops
+    if base == CUDA_SEPARATE:
+        return ops.separate_rope_kv_append
+    return ops.fused_rope_kv_append
+
+
 def base_callable(base, mode=None, backend="inductor"):
     if base == EAGER:
         return eager_impl()
     if base == COMPILE:
         return compile_impl(mode, backend)
+    if base in CUDA_BASES:
+        return cuda_impl(base)
     raise ValueError(f"unknown base {base!r}, expected one of {BASES}")
+
+
+def assert_extension_available(specs):
+    """Fail before the first configuration rather than per impl per config.
+
+    A missing _ext raises inside spec.build(), which run_config records as an ERROR row -- so an
+    unbuilt extension would otherwise produce a whole sweep of ERROR rows instead of one line
+    saying how to build it.
+    """
+    needed = sorted({s.label for s in specs if s.base in CUDA_BASES})
+    if needed and not cuda.is_available():
+        raise SystemExit(f"{needed} need the CUDA extension: {cuda.unavailable_reason()}. "
+                         f"Build it with '{cuda.BUILD_COMMAND}'.")
 
 
 class DirectRunner:
@@ -146,9 +174,10 @@ class ImplSpec:
     backend: str | None = None
 
     def resolve(self, mode=None, backend="inductor"):
-        """A spec's own mode/backend pins it; otherwise it takes the run's. Eager has neither,
-        and reporting the run's compile settings on an eager row would invent provenance."""
-        if self.base == EAGER:
+        """A spec's own mode/backend pins it; otherwise it takes the run's. Eager and the custom
+        kernels have neither, and reporting the run's compile settings on those rows would
+        invent provenance."""
+        if self.base == EAGER or self.base in CUDA_BASES:
             return None, None
         resolved_mode = self.mode if self.mode is not None else mode
         resolved_backend = self.backend if self.backend is not None else backend
@@ -179,12 +208,24 @@ IMPL_SPECS = (
     ImplSpec("graph_compile_max_autotune", COMPILE, True,
              "autotuned compile replayed through a CUDA graph",
              mode="max-autotune-no-cudagraphs"),
+    # Ladder rungs 5 and 6. The pair is a fusion ablation: identical rotation and addressing,
+    # differing only in launch count and whether k_rot is materialized.
+    ImplSpec("cuda_separate", CUDA_SEPARATE, False,
+             "custom RoPE kernel then custom append kernel, k_rot materialized"),
+    ImplSpec("cuda_fused", CUDA_FUSED, False,
+             "one custom kernel; k_rot goes straight to its cache slot"),
+    ImplSpec("graph_cuda_separate", CUDA_SEPARATE, True,
+             "the separate custom kernels replayed through a CUDA graph"),
+    ImplSpec("graph_cuda_fused", CUDA_FUSED, True,
+             "the fused custom kernel replayed through a CUDA graph"),
 )
 
 IMPL_LABELS = tuple(s.label for s in IMPL_SPECS)
-# The four rungs the committed baselines are built from. The mode variants are opt-in: each one
-# recompiles per config, and max-autotune's search would multiply a full sweep's wall clock.
+# The four rungs the committed baselines are built from. Everything else is opt-in via --impls:
+# the mode variants each recompile per config, and the custom-kernel rungs need a built
+# extension, so neither belongs in a default that committed CSVs are a subset of.
 DEFAULT_IMPLS = ("eager", "compile", "graph_eager", "graph_compile")
+CUDA_IMPLS = tuple(s.label for s in IMPL_SPECS if s.base in CUDA_BASES)
 
 
 def resolve_impls(labels):

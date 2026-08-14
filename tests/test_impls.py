@@ -5,6 +5,7 @@ import torch
 
 from benchmarks import positions as pos
 from benchmarks.impls import (
+    BASES,
     CUDAGRAPH_MODES,
     DEFAULT_IMPLS,
     IMPL_LABELS,
@@ -59,7 +60,7 @@ def test_inductors_own_cudagraphs_are_refused_inside_graph_capture(mode):
 
 def test_every_spec_declares_a_known_base():
     for spec in IMPL_SPECS:
-        assert spec.base in ("eager", "compile")
+        assert spec.base in BASES
         assert spec.description
 
 
