@@ -11,6 +11,9 @@ std::vector<at::Tensor> rope_forward(at::Tensor q, at::Tensor k, at::Tensor posi
                                      at::Tensor cos, at::Tensor sin);
 void kv_append(at::Tensor k_rot, at::Tensor v, at::Tensor positions,
                at::Tensor request_indices, at::Tensor k_cache, at::Tensor v_cache);
+at::Tensor fused_rope_kv_append(at::Tensor q, at::Tensor k, at::Tensor v, at::Tensor positions,
+                                at::Tensor cos, at::Tensor sin, at::Tensor k_cache,
+                                at::Tensor v_cache, at::Tensor request_indices);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("smoke_fill", &smoke_fill, py::arg("tensor"), py::arg("value"),
@@ -24,4 +27,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("kv_append", &kv_append, py::arg("k_rot"), py::arg("v"), py::arg("positions"),
         py::arg("request_indices"), py::arg("k_cache"), py::arg("v_cache"),
         "Scatter rotated K and raw V into a contiguous token-major cache, in place.");
+  m.def("fused_rope_kv_append", &fused_rope_kv_append, py::arg("q"), py::arg("k"), py::arg("v"),
+        py::arg("positions"), py::arg("cos"), py::arg("sin"), py::arg("k_cache"),
+        py::arg("v_cache"), py::arg("request_indices"),
+        "Rotate Q and K and append K/V to the cache in one launch; returns q_rot.");
 }
