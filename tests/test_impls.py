@@ -6,6 +6,7 @@ import torch
 from benchmarks import positions as pos
 from benchmarks.impls import (
     BASES,
+    CUDA_IMPLS,
     CUDAGRAPH_MODES,
     DEFAULT_IMPLS,
     IMPL_LABELS,
@@ -14,13 +15,20 @@ from benchmarks.impls import (
     GraphRunner,
     resolve_impls,
 )
-
-BY_LABEL = {s.label: s for s in IMPL_SPECS}
 from benchmarks.validation import validate_candidate
 from benchmarks.workload import Config, build_op_args, build_position_sets
 
+BY_LABEL = {s.label: s for s in IMPL_SPECS}
 CFG = Config("mha", 8, 8, 64, 4, 128, "fp32", pos.RAGGED)
 SEED = 1234
+
+
+def cuda_ext_available():
+    try:
+        from decode_kernels import cuda
+    except ImportError:
+        return False
+    return cuda.is_available()
 
 
 def test_labels_are_unique_and_the_default_is_the_baseline_ladder():
@@ -115,5 +123,47 @@ def test_graph_impls_pass_the_full_validation_gate(impl_label, position_mode):
     cfg = replace(CFG, position_mode=position_mode)
     runner = resolve_impls([impl_label])[0].build()
     report = validate_candidate(runner, cfg, "cuda", SEED)
+    assert report["ok"], report["failures"]
+    assert {"permuted-requests", "strided-qkv"}.issubset(report["cases"])
+
+
+def test_the_custom_kernel_rungs_are_registered_as_five_and_six():
+    assert set(CUDA_IMPLS) == {"cuda_separate", "cuda_fused",
+                               "graph_cuda_separate", "graph_cuda_fused"}
+    assert set(CUDA_IMPLS).issubset(IMPL_LABELS)
+
+
+def test_the_custom_rungs_stay_out_of_the_default_sweep():
+    """Committed baselines must stay a subset of a default run, and these need a built
+    extension -- so they are opt-in via --impls, like the compile-mode variants."""
+    assert not set(CUDA_IMPLS) & set(DEFAULT_IMPLS)
+
+
+def test_a_custom_kernel_row_reports_no_compile_provenance():
+    """Eager rows do not carry the run's inductor settings and neither should a hand-written
+    kernel; reporting them would invent provenance."""
+    for label in CUDA_IMPLS:
+        spec = resolve_impls([label])[0]
+        assert spec.resolve(mode="max-autotune", backend="inductor") == (None, None)
+
+
+def test_an_unbuilt_extension_fails_before_the_first_config(monkeypatch):
+    """A missing _ext raises inside spec.build(), which run_config records as an ERROR row -- so
+    without this the whole sweep would be ERROR rows instead of one line saying how to build it."""
+    import benchmarks.impls as impls_mod
+    monkeypatch.setattr(impls_mod.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(impls_mod.cuda, "unavailable_reason", lambda: "no compiled _ext")
+    with pytest.raises(SystemExit, match="build_ext"):
+        impls_mod.assert_extension_available(resolve_impls(["cuda_fused"]))
+    impls_mod.assert_extension_available(resolve_impls(["eager", "compile"]))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not cuda_ext_available(), reason="CUDA extension not built")
+@pytest.mark.parametrize("impl_label", ["cuda_separate", "cuda_fused",
+                                        "graph_cuda_separate", "graph_cuda_fused"])
+def test_custom_kernel_impls_pass_the_full_validation_gate(impl_label):
+    runner = resolve_impls([impl_label])[0].build()
+    report = validate_candidate(runner, CFG, "cuda", SEED)
     assert report["ok"], report["failures"]
     assert {"permuted-requests", "strided-qkv"}.issubset(report["cases"])
