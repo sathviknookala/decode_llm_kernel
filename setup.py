@@ -30,11 +30,23 @@ def sources():
     return found
 
 
+def headers():
+    """Declared as `depends` so a header edit rebuilds the .cu files that include it.
+
+    Without this, editing kernel_common.cuh leaves every object file untouched and the build
+    reports success while producing a binary from the old header -- which happened: a fix to a
+    shared check appeared not to take, and the tests were running against a stale .so.
+    """
+    return sorted(glob.glob(os.path.join(CSRC_DIR, "*.cuh"))
+                  + glob.glob(os.path.join(CSRC_DIR, "*.h")))
+
+
 def make_extension():
     os.environ.setdefault("TORCH_CUDA_ARCH_LIST", CUDA_ARCH)   # an explicit shell value wins
     return CUDAExtension(
         name=EXTENSION_NAME,
         sources=sources(),
+        depends=headers(),
         extra_compile_args={"cxx": CXX_FLAGS, "nvcc": NVCC_FLAGS + NVCC_EXTRA_FLAGS},
     )
 
