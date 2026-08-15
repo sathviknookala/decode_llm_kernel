@@ -14,7 +14,7 @@ from . import require
 
 def rope_forward(q, k, positions, cos, sin):
     """Split-half RoPE over strided Q and K in one launch. Returns (q_rot, k_rot)."""
-    return tuple(require().rope_forward(q, k, positions, cos, sin))
+    return require().rope_forward(q, k, positions, cos, sin)
 
 
 def kv_append(k_rot, v, positions, request_indices, k_cache, v_cache):

@@ -1,3 +1,5 @@
+#include <tuple>
+
 #include "kernel_common.cuh"
 
 namespace decode_kernels {
@@ -59,7 +61,7 @@ __global__ void rope_kernel(
 }  // namespace
 }  // namespace decode_kernels
 
-std::vector<at::Tensor> rope_forward(at::Tensor q, at::Tensor k, at::Tensor positions,
+std::tuple<at::Tensor, at::Tensor> rope_forward(at::Tensor q, at::Tensor k, at::Tensor positions,
                                      at::Tensor cos, at::Tensor sin) {
   using namespace decode_kernels;
   TORCH_CHECK(q.dim() == 3, "q must be [num_tokens, num_q_heads, head_dim]");

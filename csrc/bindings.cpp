@@ -2,12 +2,12 @@
 
 #include <map>
 #include <string>
-#include <vector>
+#include <tuple>
 
 void smoke_fill(at::Tensor tensor, double value);
 std::map<std::string, std::string> smoke_build_info();
 
-std::vector<at::Tensor> rope_forward(at::Tensor q, at::Tensor k, at::Tensor positions,
+std::tuple<at::Tensor, at::Tensor> rope_forward(at::Tensor q, at::Tensor k, at::Tensor positions,
                                      at::Tensor cos, at::Tensor sin);
 void kv_append(at::Tensor k_rot, at::Tensor v, at::Tensor positions,
                at::Tensor request_indices, at::Tensor k_cache, at::Tensor v_cache);
