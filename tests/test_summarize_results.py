@@ -510,3 +510,76 @@ def test_a_csv_predating_the_flag_is_not_called_unfinished(tmp_path):
     base = write_csv(tmp_path, [row("eager", 1.0), row("compile", 0.5)])
     assert build_summary(base, {}, None)["complete"] is None
     assert "did not finish" not in render_markdown(build_summary(base, {}, None))
+
+
+def ablation_row(impl, amortized_ms, **kw):
+    r = row(impl, amortized_ms, **kw)
+    r["amortized_call_ms"] = str(amortized_ms)
+    return r
+
+
+def test_graph_pairs_come_from_the_registry_not_a_hand_written_list():
+    """A pair listed by hand silently omits any rung added later; the custom-kernel rungs
+    would have reported no graph saving at all."""
+    from benchmarks.impls import IMPL_LABELS
+    from benchmarks.summarize_results import GRAPH_PAIRS
+    assert ("cuda_fused", "graph_cuda_fused") in GRAPH_PAIRS
+    assert ("compile", "graph_compile") in GRAPH_PAIRS
+    for direct, graph in GRAPH_PAIRS:
+        assert direct in IMPL_LABELS and graph in IMPL_LABELS
+
+
+def test_the_fusion_ablation_pairs_the_two_custom_rungs():
+    from benchmarks.summarize_results import fusion_ablation, fusion_ablation_summary
+    rows = [ablation_row("cuda_separate", 0.006), ablation_row("cuda_fused", 0.003),
+            ablation_row("graph_compile", 0.006)]
+    entries = fusion_ablation(rows)
+    assert len(entries) == 1
+    assert entries[0]["fusion_speedup"] == pytest.approx(2.0)
+    assert entries[0]["fused_vs_ceiling"] == pytest.approx(0.5)
+    s = fusion_ablation_summary(entries)
+    assert s["fusion_speedup"]["median"] == pytest.approx(2.0)
+    assert s["by_batch"][0]["n"] == 1
+
+
+def test_the_ablation_reads_amortized_not_the_event_median():
+    """CUDA-event bracketing costs 4.3 us on a call that launches nothing, which is the same
+    order as the work being compared here."""
+    from benchmarks.summarize_results import fusion_ablation
+    rows = [ablation_row("cuda_separate", 0.006), ablation_row("cuda_fused", 0.003)]
+    for r in rows:                       # event medians say the opposite of the amortized ones
+        r["device_median_ms"] = "0.001" if r["impl"] == "cuda_separate" else "0.009"
+    assert fusion_ablation(rows)[0]["fusion_speedup"] == pytest.approx(2.0)
+
+
+def test_a_csv_without_the_custom_rungs_reports_no_ablation_rather_than_a_zero_one():
+    """Every artifact committed before the rungs existed has no such rows, and an absent
+    ablation must not render as a measured one."""
+    from benchmarks.summarize_results import fusion_ablation, fusion_ablation_summary
+    rows = [ablation_row("eager", 0.02), ablation_row("compile", 0.007)]
+    assert fusion_ablation(rows) == []
+    assert fusion_ablation_summary([]) is None
+
+
+def test_the_ablation_section_carries_the_amdahl_caveat():
+    """A fusion number next to no caveat reads as a latency win, which amdahl_probe forecloses."""
+    from benchmarks.summarize_results import render_markdown
+    s = {"environment": {}, "source_csv": "x.csv", "rows_timed": 2, "complete": True,
+         "speedup_by_batch": [], "graph_launch_share": [],
+         "head_dim_response": {"context": {}, "rows": []},
+         "bandwidth_columns": {"over_100_pct": 0, "n": 0, "max_pct": 0.0,
+                               "max_scattered_pct": 0.0, "over_100_scattered": 0},
+         "numerical_deltas": [], "ragged_uniform": [], "serving_layout": [],
+         "launch_structure": [], "amdahl": {"savings": [], "gate": None, "mirror": [],
+                                            "control": None, "complete": None,
+                                            "source_csv": None},
+         "fusion_ablation": {"n": 1,
+                             "fusion_speedup": {"median": 2.0, "min": 2.0, "max": 2.0},
+                             "fused_vs_ceiling": {"median": 0.5, "min": 0.5, "max": 0.5},
+                             "by_batch": [{"num_requests": 1, "n": 1, "separate_us": 6.0,
+                                           "fused_us": 3.0, "fusion_speedup": 2.0,
+                                           "fused_vs_ceiling": 0.5}]}}
+    md = render_markdown(s)
+    assert "Fusion ablation" in md
+    assert "not a decode-latency result" in md
+    assert "0.0-0.9%" in md

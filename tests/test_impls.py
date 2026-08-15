@@ -167,3 +167,21 @@ def test_custom_kernel_impls_pass_the_full_validation_gate(impl_label):
     report = validate_candidate(runner, CFG, "cuda", SEED)
     assert report["ok"], report["failures"]
     assert {"permuted-requests", "strided-qkv"}.issubset(report["cases"])
+
+
+def test_an_unknown_cuda_base_raises_rather_than_returning_the_fused_kernel():
+    """The dispatch fell through to the fused kernel for anything that was not the separate
+    one, so a typo'd base would have silently benchmarked the wrong rung."""
+    import benchmarks.impls as impls_mod
+    with pytest.raises(ValueError, match="unknown CUDA base"):
+        impls_mod.cuda_impl("cuda_triton")
+
+
+def test_the_extension_check_raises_like_the_rest_of_the_module(monkeypatch):
+    """resolve_impls raises ValueError and main() decides to exit; a library function choosing
+    SystemExit takes that decision away from its caller."""
+    import benchmarks.impls as impls_mod
+    monkeypatch.setattr(impls_mod.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(impls_mod.cuda, "unavailable_reason", lambda: "no compiled _ext")
+    with pytest.raises(ValueError, match="build_ext"):
+        impls_mod.assert_extension_available(resolve_impls(["cuda_fused"]))

@@ -224,3 +224,58 @@ def test_fp16_tables_are_refused():
     with pytest.raises(RuntimeError, match="must be FP32"):
         ops.fused_rope_kv_append(a.q, a.k, a.v, a.positions, a.cos.half(), a.sin.half(),
                                  a.k_cache, a.v_cache, a.request_indices)
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_a_host_tensor_is_refused_rather_than_dereferenced_on_device(name):
+    """A CPU cos table was accepted and appeared to work: the host pointer reached the device
+    and was dereferenced there, which is undefined behaviour wearing a passing result."""
+    from decode_kernels.cuda import ops
+    cfg = cfg_for(("mha", 32, 32, 128), "bf16", batch=2)
+    p = pos.build_position_sets(cfg.num_requests, cfg.cache_alloc_len, cfg.position_mode,
+                               SEED, 1, "cuda")[0]
+    a = build_op_args(cfg, "cuda", SEED, p)
+    fn = kernel(name)
+    for label, args in (
+            ("cos", (a.q, a.k, a.v, a.positions, a.cos.cpu(), a.sin, a.k_cache, a.v_cache,
+                     a.request_indices)),
+            ("positions", (a.q, a.k, a.v, a.positions.cpu(), a.cos, a.sin, a.k_cache, a.v_cache,
+                           a.request_indices)),
+            ("request_indices", (a.q, a.k, a.v, a.positions, a.cos, a.sin, a.k_cache, a.v_cache,
+                                 a.request_indices.cpu()))):
+        with pytest.raises(RuntimeError, match="must be a CUDA tensor"):
+            fn(*args)
+    assert ops  # the module import is the point of the fixture above
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_one_buffer_used_as_both_caches_is_refused(name):
+    """K and V would race for the same slot and the winner is undefined."""
+    cfg = cfg_for(("mha", 32, 32, 128), "bf16", batch=2)
+    p = pos.build_position_sets(cfg.num_requests, cfg.cache_alloc_len, cfg.position_mode,
+                               SEED, 1, "cuda")[0]
+    a = build_op_args(cfg, "cuda", SEED, p)
+    with pytest.raises(RuntimeError, match="distinct buffers"):
+        kernel(name)(a.q, a.k, a.v, a.positions, a.cos, a.sin, a.k_cache, a.k_cache,
+                     a.request_indices)
+
+
+def test_rope_forward_returns_a_tuple_not_a_list():
+    """pybind maps std::vector to a list; the callers all want to unpack a pair."""
+    from decode_kernels import cuda as ext
+    cfg = cfg_for(("gqa", 32, 8, 128), "fp32", batch=2)
+    p = pos.build_position_sets(cfg.num_requests, cfg.cache_alloc_len, cfg.position_mode,
+                               SEED, 1, "cuda")[0]
+    a = build_op_args(cfg, "cuda", SEED, p)
+    assert isinstance(ext.require().rope_forward(a.q, a.k, a.positions, a.cos, a.sin), tuple)
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_zero_token_caches_are_not_mistaken_for_aliases(name):
+    """Two distinct empty CUDA tensors both report data_ptr() == 0, so an unguarded pointer
+    compare rejects a legitimate zero-token call."""
+    cfg = cfg_for(("mha", 32, 32, 128), "bf16", batch=0)
+    args = build_op_args(cfg, "cuda", SEED, torch.zeros(0, dtype=torch.long, device="cuda"))
+    assert args.k_cache.data_ptr() == args.v_cache.data_ptr() == 0
+    kernel(name)(*args)
+    torch.cuda.synchronize()

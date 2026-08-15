@@ -76,3 +76,13 @@ def test_identifies_which_binary_it_read(info):
 
 def test_is_callable_repeatedly(info):
     assert cuda_ext.build_info()["gencode_arch"] == info["gencode_arch"]
+
+
+def test_headers_are_declared_as_build_dependencies():
+    """distutils does not scan #include, so without depends= a header edit leaves every object
+    file untouched and the build reports success while linking the old header. That happened:
+    a fix to a shared check appeared not to take because the .so was stale."""
+    import setup as build_setup
+    found = build_setup.headers()
+    assert any(h.endswith("kernel_common.cuh") for h in found), found
+    assert build_setup.make_extension().depends == found
