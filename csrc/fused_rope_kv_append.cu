@@ -95,25 +95,26 @@ at::Tensor fused_rope_kv_append(at::Tensor q, at::Tensor k, at::Tensor v, at::Te
   const int64_t num_q_heads = q.size(1);
   const int64_t head_dim = q.size(2);
   TORCH_CHECK(head_dim % 2 == 0, "head_dim must be even for split-half RoPE, got ", head_dim);
-  check_qkv(q, "q", num_tokens, head_dim);
-  check_qkv(k, "k", num_tokens, head_dim);
-  check_qkv(v, "v", num_tokens, head_dim);
+  const at::Device device = q.device();
+  check_qkv(q, "q", num_tokens, head_dim, device);
+  check_qkv(k, "k", num_tokens, head_dim, device);
+  check_qkv(v, "v", num_tokens, head_dim, device);
   const int64_t num_kv_heads = k.size(1);
   TORCH_CHECK(v.size(1) == num_kv_heads, "v has ", v.size(1), " kv heads, expected ",
               num_kv_heads);
   TORCH_CHECK(q.scalar_type() == k.scalar_type() && q.scalar_type() == v.scalar_type(),
               "q, k and v must share a dtype");
-  check_index_tensor(positions, "positions", num_tokens);
-  check_index_tensor(request_indices, "request_indices", num_tokens);
+  check_index_tensor(positions, "positions", num_tokens, device);
+  check_index_tensor(request_indices, "request_indices", num_tokens, device);
   TORCH_CHECK(positions.scalar_type() == request_indices.scalar_type(),
               "positions and request_indices must share a dtype, got ", positions.scalar_type(),
               "/", request_indices.scalar_type());
-  check_rope_tables(cos, sin, head_dim);
-  check_cache(k_cache, "k_cache", k, num_kv_heads, head_dim);
-  check_cache(v_cache, "v_cache", v, num_kv_heads, head_dim);
-  TORCH_CHECK(k_cache.sizes() == v_cache.sizes(), "k_cache and v_cache must have the same shape");
+  check_rope_tables(cos, sin, head_dim, device);
+  check_cache(k_cache, "k_cache", k, num_kv_heads, head_dim, device);
+  check_cache(v_cache, "v_cache", v, num_kv_heads, head_dim, device);
+  check_caches_are_distinct(k_cache, v_cache);
 
-  const at::cuda::CUDAGuard guard(q.device());
+  const at::cuda::CUDAGuard guard(device);
   auto q_out = at::empty({num_tokens, num_q_heads, head_dim}, q.options());
   if (num_tokens == 0) return q_out;
 

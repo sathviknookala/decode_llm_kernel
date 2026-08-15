@@ -50,7 +50,19 @@ __device__ __forceinline__ int64_t table_offset(int64_t position, int64_t max_po
   return position * table_stride;
 }
 
-inline void check_rope_tables(const at::Tensor& cos, const at::Tensor& sin, int64_t head_dim) {
+// Every tensor must live on the one device the kernel is launched on. Without this a host
+// pointer reaches the device and is dereferenced there: a CPU cos table was accepted and
+// "worked", which is undefined behaviour wearing a passing result.
+inline void check_device(const at::Tensor& t, const char* name, const at::Device& device) {
+  TORCH_CHECK(t.is_cuda(), name, " must be a CUDA tensor, got ", t.device());
+  TORCH_CHECK(t.device() == device, name, " is on ", t.device(), " but the operation runs on ",
+              device, "; every tensor must be on one device");
+}
+
+inline void check_rope_tables(const at::Tensor& cos, const at::Tensor& sin, int64_t head_dim,
+                              const at::Device& device) {
+  check_device(cos, "cos", device);
+  check_device(sin, "sin", device);
   TORCH_CHECK(cos.scalar_type() == at::kFloat && sin.scalar_type() == at::kFloat,
               "cos/sin must be FP32 per the locked RoPE semantics, got ", cos.scalar_type(),
               "/", sin.scalar_type());
@@ -64,8 +76,8 @@ inline void check_rope_tables(const at::Tensor& cos, const at::Tensor& sin, int6
 // head_dim (the last dim) must be contiguous; token and head dims may carry arbitrary strides,
 // because a fused QKV projection is split into views whose token stride is the fused width.
 inline void check_qkv(const at::Tensor& t, const char* name, int64_t num_tokens,
-                      int64_t head_dim) {
-  TORCH_CHECK(t.is_cuda(), name, " must be a CUDA tensor, got ", t.device());
+                      int64_t head_dim, const at::Device& device) {
+  check_device(t, name, device);
   TORCH_CHECK(t.dim() == 3, name, " must be [num_tokens, num_heads, head_dim], got ", t.dim(),
               " dims");
   TORCH_CHECK(t.size(0) == num_tokens, name, " has ", t.size(0), " tokens, expected ",
@@ -75,8 +87,9 @@ inline void check_qkv(const at::Tensor& t, const char* name, int64_t num_tokens,
               t.stride(2), ")");
 }
 
-inline void check_index_tensor(const at::Tensor& t, const char* name, int64_t num_tokens) {
-  TORCH_CHECK(t.is_cuda(), name, " must be a CUDA tensor, got ", t.device());
+inline void check_index_tensor(const at::Tensor& t, const char* name, int64_t num_tokens,
+                               const at::Device& device) {
+  check_device(t, name, device);
   TORCH_CHECK(t.scalar_type() == at::kInt || t.scalar_type() == at::kLong,
               name, " must be int32 or int64, got ", t.scalar_type());
   TORCH_CHECK(t.dim() == 1 && t.size(0) == num_tokens,
@@ -85,8 +98,8 @@ inline void check_index_tensor(const at::Tensor& t, const char* name, int64_t nu
 }
 
 inline void check_cache(const at::Tensor& cache, const char* name, const at::Tensor& like,
-                       int64_t num_kv_heads, int64_t head_dim) {
-  TORCH_CHECK(cache.is_cuda(), name, " must be a CUDA tensor, got ", cache.device());
+                       int64_t num_kv_heads, int64_t head_dim, const at::Device& device) {
+  check_device(cache, name, device);
   TORCH_CHECK(cache.is_contiguous(), name, " must be contiguous, token-major");
   TORCH_CHECK(cache.dim() == 4, name, " must be [batch, cache_alloc_len, num_kv_heads, "
               "head_dim], got ", cache.dim(), " dims");
@@ -98,6 +111,17 @@ inline void check_cache(const at::Tensor& cache, const char* name, const at::Ten
   TORCH_CHECK(cache.scalar_type() == like.scalar_type(),
               name, " dtype ", cache.scalar_type(), " must match its source dtype ",
               like.scalar_type());
+}
+
+inline void check_caches_are_distinct(const at::Tensor& k_cache, const at::Tensor& v_cache) {
+  TORCH_CHECK(k_cache.sizes() == v_cache.sizes(),
+              "k_cache and v_cache must have the same shape");
+  // Guarded on numel: two distinct empty tensors both report data_ptr() == 0, so an unguarded
+  // pointer compare rejects a legitimate zero-token call. Pointer equality catches the realistic
+  // case; it is not full overlap detection, and two views into one storage would still race.
+  TORCH_CHECK(k_cache.numel() == 0 || k_cache.data_ptr() != v_cache.data_ptr(),
+              "k_cache and v_cache must be distinct buffers; sharing one makes the K and V "
+              "writes race for the same slot");
 }
 
 }  // namespace decode_kernels

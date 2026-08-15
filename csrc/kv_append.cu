@@ -49,23 +49,24 @@ void kv_append(at::Tensor k_rot, at::Tensor v, at::Tensor positions,
   const int64_t num_tokens = k_rot.size(0);
   const int64_t num_kv_heads = k_rot.size(1);
   const int64_t head_dim = k_rot.size(2);
-  check_qkv(k_rot, "k_rot", num_tokens, head_dim);
-  check_qkv(v, "v", num_tokens, head_dim);
+  const at::Device device = k_rot.device();
+  check_qkv(k_rot, "k_rot", num_tokens, head_dim, device);
+  check_qkv(v, "v", num_tokens, head_dim, device);
   TORCH_CHECK(v.size(1) == num_kv_heads, "v has ", v.size(1), " kv heads, expected ",
               num_kv_heads);
   TORCH_CHECK(k_rot.scalar_type() == v.scalar_type(), "k_rot and v must share a dtype, got ",
               k_rot.scalar_type(), "/", v.scalar_type());
-  check_index_tensor(positions, "positions", num_tokens);
-  check_index_tensor(request_indices, "request_indices", num_tokens);
+  check_index_tensor(positions, "positions", num_tokens, device);
+  check_index_tensor(request_indices, "request_indices", num_tokens, device);
   TORCH_CHECK(positions.scalar_type() == request_indices.scalar_type(),
               "positions and request_indices must share a dtype, got ", positions.scalar_type(),
               "/", request_indices.scalar_type());
-  check_cache(k_cache, "k_cache", k_rot, num_kv_heads, head_dim);
-  check_cache(v_cache, "v_cache", v, num_kv_heads, head_dim);
-  TORCH_CHECK(k_cache.sizes() == v_cache.sizes(), "k_cache and v_cache must have the same shape");
+  check_cache(k_cache, "k_cache", k_rot, num_kv_heads, head_dim, device);
+  check_cache(v_cache, "v_cache", v, num_kv_heads, head_dim, device);
+  check_caches_are_distinct(k_cache, v_cache);
 
   if (num_tokens == 0) return;
-  const at::cuda::CUDAGuard guard(k_rot.device());
+  const at::cuda::CUDAGuard guard(device);
   const int64_t work = num_tokens * num_kv_heads * head_dim;
   auto stream = at::cuda::getCurrentCUDAStream();
   AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16,

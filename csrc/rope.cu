@@ -67,15 +67,16 @@ std::vector<at::Tensor> rope_forward(at::Tensor q, at::Tensor k, at::Tensor posi
   const int64_t num_q_heads = q.size(1);
   const int64_t head_dim = q.size(2);
   TORCH_CHECK(head_dim % 2 == 0, "head_dim must be even for split-half RoPE, got ", head_dim);
-  check_qkv(q, "q", num_tokens, head_dim);
-  check_qkv(k, "k", num_tokens, head_dim);
+  const at::Device device = q.device();
+  check_qkv(q, "q", num_tokens, head_dim, device);
+  check_qkv(k, "k", num_tokens, head_dim, device);
   TORCH_CHECK(q.scalar_type() == k.scalar_type(), "q and k must share a dtype, got ",
               q.scalar_type(), "/", k.scalar_type());
-  check_index_tensor(positions, "positions", num_tokens);
-  check_rope_tables(cos, sin, head_dim);
+  check_index_tensor(positions, "positions", num_tokens, device);
+  check_rope_tables(cos, sin, head_dim, device);
   const int64_t num_kv_heads = k.size(1);
 
-  const at::cuda::CUDAGuard guard(q.device());
+  const at::cuda::CUDAGuard guard(device);
   auto q_out = at::empty({num_tokens, num_q_heads, head_dim}, q.options());
   auto k_out = at::empty({num_tokens, num_kv_heads, head_dim}, k.options());
   if (num_tokens == 0) return {q_out, k_out};
