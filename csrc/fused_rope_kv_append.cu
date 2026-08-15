@@ -38,9 +38,11 @@ __global__ void fused_rope_kv_append_kernel(
     const int head = static_cast<int>(rest % heads_total);
     const int64_t token = rest / heads_total;
 
+    // Loaded once for the whole body: the K branch used to read it again for its table row.
+    const int64_t position = static_cast<int64_t>(positions[token]);
+
     if (head < num_q_heads) {
-      const int64_t row = table_offset(static_cast<int64_t>(positions[token]), max_position,
-                                       table_stride);
+      const int64_t row = table_offset(position, max_position, table_stride);
       const float c = cos_table[row + pair];
       const float s = sin_table[row + pair];
       const int64_t in_base = token * q_token_stride + static_cast<int64_t>(head) * q_head_stride;
@@ -53,13 +55,11 @@ __global__ void fused_rope_kv_append_kernel(
       continue;
     }
 
-    const int64_t slot = cache_offset(static_cast<int64_t>(request_indices[token]),
-                                      static_cast<int64_t>(positions[token]),
+    const int64_t slot = cache_offset(static_cast<int64_t>(request_indices[token]), position,
                                       batch_size, cache_alloc_len, per_token);
     if (head < num_q_heads + num_kv_heads) {
       const int kv_head = head - num_q_heads;
-      const int64_t row = table_offset(static_cast<int64_t>(positions[token]), max_position,
-                                       table_stride);
+      const int64_t row = table_offset(position, max_position, table_stride);
       const float c = cos_table[row + pair];
       const float s = sin_table[row + pair];
       const int64_t in_base =
