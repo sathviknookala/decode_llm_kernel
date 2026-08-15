@@ -49,7 +49,9 @@ def cuda_impl(base):
     from decode_kernels.cuda import ops
     if base == CUDA_SEPARATE:
         return ops.separate_rope_kv_append
-    return ops.fused_rope_kv_append
+    if base == CUDA_FUSED:
+        return ops.fused_rope_kv_append
+    raise ValueError(f"unknown CUDA base {base!r}, expected one of {CUDA_BASES}")
 
 
 def base_callable(base, mode=None, backend="inductor"):
