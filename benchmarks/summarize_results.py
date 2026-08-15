@@ -8,9 +8,13 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from benchmarks.benchmark_utils import REPO_ROOT, read_env_doc, read_run_completeness
+from benchmarks.impls import IMPL_LABELS
 
 MAIN_LAYOUT = ("packed", "identity")
-GRAPH_PAIRS = (("eager", "graph_eager"), ("compile", "graph_compile"))
+# Derived from the registry, not hardcoded: a pair listed by hand silently omits any rung added
+# later, which is how the custom-kernel rungs would have reported no graph saving at all.
+GRAPH_PAIRS = tuple((label, f"graph_{label}") for label in IMPL_LABELS
+                    if f"graph_{label}" in IMPL_LABELS)
 CONFIG_KEYS = ("head_label", "num_q_heads", "num_kv_heads", "head_dim", "num_requests",
                "cache_alloc_len", "dtype_label", "position_mode", "layout", "request_mapping")
 
