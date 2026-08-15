@@ -345,9 +345,9 @@ def main():
 
     try:
         specs = resolve_impls(args.impls)
+        assert_extension_available(specs)
     except ValueError as e:
         raise SystemExit(str(e))
-    assert_extension_available(specs)
 
     modes = (pos.UNIFORM, pos.RAGGED) if args.position_mode == "both" else (args.position_mode,)
     with gpu_clock_lock(args.device_index, args.lock_clocks) as clock_status:

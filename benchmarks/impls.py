@@ -69,11 +69,12 @@ def assert_extension_available(specs):
 
     A missing _ext raises inside spec.build(), which run_config records as an ERROR row -- so an
     unbuilt extension would otherwise produce a whole sweep of ERROR rows instead of one line
-    saying how to build it.
+    saying how to build it. Raises like resolve_impls does and lets the entry point decide to
+    exit; a library module choosing SystemExit takes that decision away from its caller.
     """
     needed = sorted({s.label for s in specs if s.base in CUDA_BASES})
     if needed and not cuda.is_available():
-        raise SystemExit(f"{needed} need the CUDA extension: {cuda.unavailable_reason()}. "
+        raise ValueError(f"{needed} need the CUDA extension: {cuda.unavailable_reason()}. "
                          f"Build it with '{cuda.BUILD_COMMAND}'.")
 
 

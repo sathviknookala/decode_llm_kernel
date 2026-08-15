@@ -153,7 +153,7 @@ def test_an_unbuilt_extension_fails_before_the_first_config(monkeypatch):
     import benchmarks.impls as impls_mod
     monkeypatch.setattr(impls_mod.cuda, "is_available", lambda: False)
     monkeypatch.setattr(impls_mod.cuda, "unavailable_reason", lambda: "no compiled _ext")
-    with pytest.raises(SystemExit, match="build_ext"):
+    with pytest.raises(ValueError, match="build_ext"):
         impls_mod.assert_extension_available(resolve_impls(["cuda_fused"]))
     impls_mod.assert_extension_available(resolve_impls(["eager", "compile"]))
 

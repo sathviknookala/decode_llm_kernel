@@ -17,7 +17,7 @@ from benchmarks.benchmark_utils import (
     sync,
     write_json,
 )
-from benchmarks.impls import IMPL_LABELS, resolve_impls
+from benchmarks.impls import IMPL_LABELS, assert_extension_available, resolve_impls
 from benchmarks.validation import validate_candidate
 from benchmarks.workload import (
     Config,
@@ -193,6 +193,7 @@ def main():
 
     try:
         specs = resolve_impls(args.impls)
+        assert_extension_available(specs)
     except ValueError as e:
         raise SystemExit(str(e))
 
