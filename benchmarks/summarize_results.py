@@ -72,6 +72,72 @@ def graph_launch_share(rows):
     return out
 
 
+SEPARATE_IMPL = "cuda_separate"
+FUSED_IMPL = "cuda_fused"
+CEILING_IMPL = "graph_compile"
+
+
+def _amortized_us(row):
+    return float(row["amortized_call_ms"]) * 1000.0
+
+
+def fusion_ablation(rows):
+    """Rung 6 against rung 5, and rung 6 against the compiled ceiling.
+
+    amortized_call_ms rather than device_median_ms: CUDA-event bracketing costs 4.3 us on a call
+    that launches nothing, which is the same order as the work being compared here.
+
+    The two custom rungs share a rotation and an addressing helper and differ only in launch
+    count and whether k_rot is materialized, so their ratio is the fusion benefit isolated from
+    the benefit of merely replacing framework code. That is the question Checkpoint C exists to
+    answer. It is not a decode-latency claim -- see the caveat rendered beside it.
+    """
+    out = []
+    for key, m in sorted(by_config(rows).items()):
+        if FUSED_IMPL not in m or SEPARATE_IMPL not in m:
+            continue
+        entry = {"config": dict(zip(CONFIG_KEYS, key)),
+                 "num_requests": int(key[CONFIG_KEYS.index("num_requests")]),
+                 "head_label": key[CONFIG_KEYS.index("head_label")],
+                 "separate_us": _amortized_us(m[SEPARATE_IMPL]),
+                 "fused_us": _amortized_us(m[FUSED_IMPL])}
+        entry["fusion_speedup"] = entry["separate_us"] / entry["fused_us"]
+        if CEILING_IMPL in m:
+            entry["ceiling_us"] = _amortized_us(m[CEILING_IMPL])
+            entry["fused_vs_ceiling"] = entry["fused_us"] / entry["ceiling_us"]
+        out.append(entry)
+    return out
+
+
+def _spread(values):
+    return {"median": st.median(values), "min": min(values), "max": max(values)}
+
+
+def fusion_ablation_summary(entries):
+    """None when the CSV carries no custom-kernel rows, which is every artifact committed before
+    the rungs existed -- an absent ablation must not render as a zero one."""
+    if not entries:
+        return None
+    ceiling = [e["fused_vs_ceiling"] for e in entries if "fused_vs_ceiling" in e]
+    by_batch = []
+    for b in sorted({e["num_requests"] for e in entries}):
+        group = [e for e in entries if e["num_requests"] == b]
+        by_batch.append({
+            "num_requests": b, "n": len(group),
+            "separate_us": st.median([e["separate_us"] for e in group]),
+            "fused_us": st.median([e["fused_us"] for e in group]),
+            "fusion_speedup": st.median([e["fusion_speedup"] for e in group]),
+            "fused_vs_ceiling": st.median([e["fused_vs_ceiling"] for e in group
+                                           if "fused_vs_ceiling" in e]) if ceiling else None,
+        })
+    return {
+        "n": len(entries),
+        "fusion_speedup": _spread([e["fusion_speedup"] for e in entries]),
+        "fused_vs_ceiling": _spread(ceiling) if ceiling else None,
+        "by_batch": by_batch,
+    }
+
+
 def ragged_uniform_ratio(rows):
     """Ragged over uniform device median at otherwise identical configs."""
     grouped = by_config(rows)
@@ -367,6 +433,7 @@ def build_summary(csv_path, env, profile_summary, amdahl_csv=None):
         "ragged_uniform": ragged_uniform_ratio(rows),
         "serving_layout": serving_layout_cost(rows),
         "launch_structure": launch_structure(profile_summary),
+        "fusion_ablation": fusion_ablation_summary(fusion_ablation(rows)),
     }
 
 
@@ -560,6 +627,35 @@ def render_markdown(s):
                     "operation is serial, so a near-zero ratio under compile is a property of "
                     "the workload rather than an insensitive instrument. Without these eager "
                     "rows the demotion would rest on a null result."]
+
+    fa = s.get("fusion_ablation")
+    if fa:
+        sp, ceil = fa["fusion_speedup"], fa["fused_vs_ceiling"]
+        out += ["", "## Fusion ablation: rung 6 against rung 5", "",
+                "The two custom rungs share a rotation and an addressing helper and differ only "
+                "in launch count and whether `k_rot` is materialized, so this ratio is the "
+                "fusion benefit isolated from the benefit of merely replacing framework code. "
+                "Quoted from `amortized_call_ms`: CUDA-event bracketing costs 4.3 us on a call "
+                "that launches nothing, which is the same order as the work being compared.", ""]
+        out += _table(["batch", "separate us", "fused us", "fused speedup",
+                       "fused / graph_compile", "configs"],
+                      [[b["num_requests"], f"{b['separate_us']:.2f}", f"{b['fused_us']:.2f}",
+                        f"{b['fusion_speedup']:.2f}x",
+                        f"{b['fused_vs_ceiling']:.2f}x" if b["fused_vs_ceiling"] else "n/a",
+                        b["n"]] for b in fa["by_batch"]])
+        out += ["", f"Over {fa['n']} configurations, fusing is a median **{sp['median']:.2f}x** "
+                f"({sp['min']:.2f}-{sp['max']:.2f}) against the separate kernels."]
+        if ceil:
+            out += [f"Against the compiled-plus-graphs ceiling the fused kernel runs at a median "
+                    f"**{ceil['median']:.2f}x** ({ceil['min']:.2f}-{ceil['max']:.2f}); below 1.00 "
+                    f"means faster than the ceiling."]
+        out += ["",
+                "**This is not a decode-latency result and must not be quoted as one.** "
+                "`amdahl_probe.csv` measured *doubling* this operation inside a real decode step "
+                "at 0.0-0.9% under both compiled modes, so the operator is not on the critical "
+                "path and a faster kernel here does not shorten a step. The ablation is worth "
+                "having as a fusion measurement and as the route to paged caches; the honest "
+                "headline remains the negative result."]
 
     if s["launch_structure"]:
         out += ["", "## Launch structure (profiler)", ""]
