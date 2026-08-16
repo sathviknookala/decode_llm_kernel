@@ -658,6 +658,9 @@ class ResumableRun:
         knows the expected value of.
         """
         self.planned = list(dict.fromkeys(unit_keys))
+        # checkpointed immediately: a run killed during warmup, before its first unit closes,
+        # otherwise leaves nothing on disk at all and cannot be told from one never launched
+        self._checkpoint(False)
         return self.planned
 
     def missing(self):
