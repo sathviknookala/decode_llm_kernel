@@ -1,3 +1,4 @@
+import atexit
 import csv
 import hashlib
 import json
@@ -448,6 +449,78 @@ def env_path(out):
     return os.path.splitext(out)[0] + ".env.json"
 
 
+def lock_path(out):
+    return out + ".lock"
+
+
+def _lock_owner(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _owner_is_gone(owner, host):
+    # Liveness is only decidable for a pid on this host; anything else is assumed live, which
+    # is the direction that refuses rather than the one that overwrites.
+    if owner.get("host") != host or not isinstance(owner.get("pid"), int):
+        return False
+    try:
+        os.kill(owner["pid"], 0)
+    except ProcessLookupError:
+        return True
+    except Exception:
+        return False
+    return False
+
+
+def claim_output(out):
+    """One live writer per output path; returns the release callable.
+
+    Both writers rewrite the whole CSV from their own in-memory rows at every unit boundary, so
+    concurrent runs do not interleave rows -- they alternate whole files, and whichever finishes
+    last silently discards everything the other measured.
+    """
+    path = lock_path(out)
+    host, pid = platform.node(), os.getpid()
+    dirname = os.path.dirname(path)
+    if dirname:
+        os.makedirs(dirname, exist_ok=True)
+
+    for attempt in (0, 1):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            owner = _lock_owner(path)
+            # the same process reclaiming its own output is not the hazard this guards
+            if owner.get("pid") == pid and owner.get("host") == host:
+                return lambda: _release_output(path, pid, host)
+            if attempt == 0 and _owner_is_gone(owner, host):
+                print(f"# clearing a lock left by dead pid {owner.get('pid')}", flush=True)
+                _release_output(path, owner.get("pid"), owner.get("host"))
+                continue
+            raise SystemExit(
+                f"{out} is already being written by pid {owner.get('pid')} on "
+                f"{owner.get('host')} since {owner.get('since')}. Two runs on one path do not "
+                f"merge -- whichever finishes last discards the other's rows. Use a different "
+                f"--out, or remove {path} if that run is gone.")
+        with os.fdopen(fd, "w") as f:
+            json.dump({"pid": pid, "host": host, "out": out,
+                       "since": datetime.now(timezone.utc).isoformat()}, f)
+        atexit.register(_release_output, path, pid, host)
+        return lambda: _release_output(path, pid, host)
+    raise SystemExit(f"could not claim {path}")
+
+
+def _release_output(path, pid, host):
+    if _lock_owner(path).get("pid") == pid and _lock_owner(path).get("host") == host:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+
 def read_rows(path):
     if not path or not os.path.exists(path):
         return []
@@ -534,6 +607,7 @@ class ResumableRun:
         self.prior_meta = {}
         self.segment = 0
         self.planned = None
+        self._release = claim_output(out)
         if resume:
             self._inherit()
         self._record_segment()
@@ -615,6 +689,7 @@ class ResumableRun:
     def finish(self, sidecar_extra=None):
         self.sidecar.update(sidecar_extra or {})
         self._checkpoint(True)
+        self._release()
         planned, absent = self.planned or [], self.missing()
         if absent:
             print(f"WARNING: {self.out} reached the end of the run with {len(absent)} of "

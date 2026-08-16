@@ -1,5 +1,7 @@
 import json
 import os
+import platform
+import subprocess
 
 import pytest
 
@@ -9,6 +11,7 @@ from benchmarks.benchmark_utils import (
     UNIT_KEY,
     ResumableRun,
     env_path,
+    lock_path,
     read_env_doc,
     read_rows,
     read_run_completeness,
@@ -269,6 +272,60 @@ def test_a_csv_predating_unit_keys_is_measured_again_whole(out):
     run = ResumableRun(out, META, resume=True)
     assert run.rows == []
     assert not run.done("cfg_a")
+
+
+def test_a_second_live_writer_on_one_path_is_refused(out):
+    """Neither run interleaves rows -- each rewrites the whole CSV from its own list at every
+    unit boundary, so whichever finishes last discards everything the other measured."""
+    ResumableRun(out, META).add("cfg_a", ladder("cfg_a"))
+    other = {"pid": 999_999, "host": "elsewhere", "since": "2026-08-15T00:00:00+00:00"}
+    with open(lock_path(out), "w") as f:
+        json.dump(other, f)
+
+    with pytest.raises(SystemExit, match="already being written by pid 999999"):
+        ResumableRun(out, META, resume=True)
+
+
+def test_a_lock_left_by_a_dead_process_is_cleared(out):
+    """A killed run cannot release its own lock, and resuming it is the entire point."""
+    with open(lock_path(out), "w") as f:
+        json.dump({"pid": _a_dead_pid(), "host": platform.node(), "since": "earlier"}, f)
+
+    run = ResumableRun(out, META)
+    run.add("cfg_a", ladder("cfg_a"))
+    run.finish()
+    assert not os.path.exists(lock_path(out))
+
+
+def test_a_lock_from_another_host_is_not_assumed_dead(out):
+    """os.kill says nothing about a pid on a different machine, and a shared filesystem is the
+    case where two writers are most likely."""
+    with open(lock_path(out), "w") as f:
+        json.dump({"pid": os.getpid(), "host": "some-other-box", "since": "earlier"}, f)
+    with pytest.raises(SystemExit, match="some-other-box"):
+        ResumableRun(out, META)
+
+
+def test_the_same_process_may_reclaim_its_own_output(out):
+    """Resuming in-process is how every probe test and the sweep's own retry path work."""
+    ResumableRun(out, META).add("cfg_a", ladder("cfg_a"))
+    assert ResumableRun(out, META, resume=True).done("cfg_a")
+
+
+def test_finishing_releases_the_lock(out):
+    run = ResumableRun(out, META)
+    run.add("cfg_a", ladder("cfg_a"))
+    assert os.path.exists(lock_path(out))
+    run.finish()
+    assert not os.path.exists(lock_path(out))
+
+
+def _a_dead_pid():
+    """A reaped child, so the pid is real and certainly gone. fork() here would warn: the test
+    process has torch loaded and is multi-threaded."""
+    p = subprocess.Popen(["/bin/true"])
+    p.wait()
+    return p.pid
 
 
 def test_a_run_that_fell_out_of_its_loop_early_is_not_covered(out):
