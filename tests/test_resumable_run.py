@@ -269,6 +269,30 @@ def test_a_csv_predating_unit_keys_is_measured_again_whole(out):
     assert not run.done("cfg_a")
 
 
+def test_two_configurations_sharing_a_unit_key_is_an_error(out):
+    """Silent either way otherwise: fresh, the rows merge under one key; resumed, done() reports
+    the second already measured and it never runs. Both leave a CSV that looks finished."""
+    run = ResumableRun(out, META)
+    run.add("cfg_a", ladder("cfg_a"))
+    with pytest.raises(ValueError, match="share a unit key"):
+        run.add("cfg_a", ladder("cfg_a"))
+
+
+def test_a_key_collision_against_an_inherited_unit_is_an_error(out):
+    """done() is what a probe is supposed to consult; reaching add() anyway means the key is
+    not distinguishing what the probe thinks it is."""
+    ResumableRun(out, META).add("cfg_a", ladder("cfg_a"))
+    resumed = ResumableRun(out, META, resume=True)
+    with pytest.raises(ValueError, match="share a unit key"):
+        resumed.add("cfg_a", ladder("cfg_a"))
+
+
+def test_an_unkeyed_unit_is_an_error(out):
+    """Rows keyed '' are dropped by _inherit, so they would be re-measured every resume."""
+    with pytest.raises(ValueError, match="needs a key"):
+        ResumableRun(out, META).add("", ladder("cfg_a"))
+
+
 def test_finished_units_with_no_sidecar_at_all_are_refused(out):
     """Deleting env.json turned every guard off at once: no sha, no digest, no arguments, and
     resume_is_safe reporting 'no prior provenance' as a pass."""

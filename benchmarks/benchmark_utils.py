@@ -559,6 +559,14 @@ class ResumableRun:
 
     def add(self, unit_key, rows):
         """One unit's rows, stamped and checkpointed. Nothing else may write to self.rows."""
+        # Two configurations keyed the same is a probe bug with no loud symptom: fresh, their
+        # rows merge under one key; resumed, done() reports the second already measured and it
+        # never runs. Either way the CSV looks finished and a configuration is missing from it.
+        if not unit_key:
+            raise ValueError("a unit needs a key; rows keyed '' are dropped by every resume")
+        if unit_key in self.units:
+            raise ValueError(f"unit {unit_key!r} was already measured in this run; two "
+                             f"configurations share a unit key and one of them will be lost")
         for r in rows:
             r[UNIT_KEY] = unit_key
         self.rows.extend(rows)
