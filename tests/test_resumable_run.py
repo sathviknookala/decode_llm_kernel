@@ -271,6 +271,76 @@ def test_a_csv_predating_unit_keys_is_measured_again_whole(out):
     assert not run.done("cfg_a")
 
 
+def test_a_run_that_fell_out_of_its_loop_early_is_not_covered(out):
+    """`complete` only ever meant "reached finish()". A run that broke out after two configs
+    wrote the same flag as one that swept the matrix."""
+    run = ResumableRun(out, META)
+    run.declare(["cfg_a", "cfg_b", "cfg_c"])
+    run.add("cfg_a", ladder("cfg_a"))
+    run.finish()
+
+    doc = json.load(open(env_path(out)))
+    assert doc["complete"] is True, "the process did reach the end"
+    assert doc["covered"] is False
+    assert doc["units_missing"] == ["cfg_b", "cfg_c"]
+    assert doc["units_planned"] == 3
+
+
+def test_a_run_that_swept_its_matrix_is_covered(out):
+    run = ResumableRun(out, META)
+    run.declare(["cfg_a", "cfg_b"])
+    run.add("cfg_a", ladder("cfg_a"))
+    run.add("cfg_b", ladder("cfg_b"))
+    run.finish()
+
+    doc = json.load(open(env_path(out)))
+    assert doc["covered"] is True
+    assert doc["units_missing"] == []
+
+
+def test_coverage_counts_inherited_units(out):
+    """A resume that measures nothing because everything was already done is still covered."""
+    first = ResumableRun(out, META)
+    first.declare(["cfg_a", "cfg_b"])
+    first.add("cfg_a", ladder("cfg_a"))
+    first.add("cfg_b", ladder("cfg_b"))
+    first.finish()
+
+    second = ResumableRun(out, META, resume=True)
+    second.declare(["cfg_a", "cfg_b"])
+    second.finish()
+    assert json.load(open(env_path(out)))["covered"] is True
+
+
+def test_missing_units_are_reported_while_the_run_is_still_going(out):
+    """A checkpoint mid-run should already say what is outstanding, or the status of a killed
+    run has to be reconstructed from the CSV by hand."""
+    run = ResumableRun(out, META)
+    run.declare(["cfg_a", "cfg_b"])
+    run.add("cfg_a", ladder("cfg_a"))
+
+    doc = json.load(open(env_path(out)))
+    assert doc["complete"] is False
+    assert doc["units_missing"] == ["cfg_b"]
+
+
+def test_an_undeclared_run_records_no_coverage_rather_than_false_coverage(out):
+    """Not every probe can know its matrix up front; absent a plan, "covered" is unanswerable
+    and must not be answered."""
+    run = ResumableRun(out, META)
+    run.add("cfg_a", ladder("cfg_a"))
+    run.finish()
+    assert "covered" not in json.load(open(env_path(out)))
+
+
+def test_finishing_short_of_the_plan_warns_on_stderr(out, capsys):
+    run = ResumableRun(out, META)
+    run.declare(["cfg_a", "cfg_b"])
+    run.add("cfg_a", ladder("cfg_a"))
+    run.finish()
+    assert "1 of 2 planned units unmeasured" in capsys.readouterr().err
+
+
 def test_each_row_names_the_process_that_measured_it(out):
     """Which rows came from which process was unrecoverable from the CSV, so a run resumed
     across a driver upgrade could not be split at the boundary after the fact."""

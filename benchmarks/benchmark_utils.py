@@ -533,6 +533,7 @@ class ResumableRun:
         # that re-derives a reference the old rows were scored against would mix two of them
         self.prior_meta = {}
         self.segment = 0
+        self.planned = None
         if resume:
             self._inherit()
         self._record_segment()
@@ -575,6 +576,21 @@ class ResumableRun:
         })
         self.meta["resume_chain"] = chain
 
+    def declare(self, unit_keys):
+        """The units this run intends to measure, so `complete` can mean covered.
+
+        Without a plan, finish() marks a run complete whether it swept the matrix or fell out of
+        the loop after two configs -- the only readable difference is a row count no consumer
+        knows the expected value of.
+        """
+        self.planned = list(dict.fromkeys(unit_keys))
+        return self.planned
+
+    def missing(self):
+        if self.planned is None:
+            return []
+        return [k for k in self.planned if k not in self.units]
+
     def done(self, unit_key):
         return unit_key in self.units
 
@@ -599,10 +615,23 @@ class ResumableRun:
     def finish(self, sidecar_extra=None):
         self.sidecar.update(sidecar_extra or {})
         self._checkpoint(True)
+        planned, absent = self.planned or [], self.missing()
+        if absent:
+            print(f"WARNING: {self.out} reached the end of the run with {len(absent)} of "
+                  f"{len(planned)} planned units unmeasured: {', '.join(absent[:5])}"
+                  f"{' ...' if len(absent) > 5 else ''}", file=sys.stderr, flush=True)
 
     def _checkpoint(self, complete):
+        # `complete` still means the process reached the end; `covered` means it swept its
+        # matrix. Folding the two would change what every existing consumer reads out of the
+        # flag, and a run can honestly be one without the other.
+        coverage = {}
+        if self.planned is not None:
+            absent = self.missing()
+            coverage = {"units_planned": len(self.planned), "units_missing": absent,
+                        "covered": not absent}
         write_csv(self.out, self.rows)
         write_json(env_path(self.out),
                    {"environment": self.meta, "complete": complete,
                     "rows_written": len(self.rows), "units_written": len(self.units),
-                    **self.sidecar})
+                    **coverage, **self.sidecar})

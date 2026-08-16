@@ -245,11 +245,13 @@ def _run_benchmark(args, device, specs, modes, clock_status):
           f"{' (dirty)' if meta['git_dirty'] else ''}")
 
     run = ResumableRun(args.out, meta, resume=args.resume, unit_ok=config_ran)
+    matrix = list(build_matrix(args.quick, position_modes=modes))
+    run.declare(cfg.label() for cfg in matrix)
     bw_ref = bandwidth_reference(args, device, run)
     bw_ref_gbps = bw_ref["reference_gbps"] if bw_ref else None
     scattered_ref_gbps = bw_ref["scattered_write_reference_gbps"] if bw_ref else None
     run.meta["bandwidth_reference"] = bw_ref
-    for cfg in build_matrix(args.quick, position_modes=modes):
+    for cfg in matrix:
         if run.done(cfg.label()):
             print(f"SKIPPED {cfg.label()}: already measured", flush=True)
             continue

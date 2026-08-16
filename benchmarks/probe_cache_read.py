@@ -202,6 +202,7 @@ def main():
                        unit_ok=ladder_ran,
                        sidecar={"arms": list(args.arms), "ctx_ladder": args.ctxs,
                                 "enable_gqa_available": supports_enable_gqa()})
+    eligible = []
     for head_cfg in heads:
         for batch in args.batches:
             for ctx in args.ctxs:
@@ -210,22 +211,25 @@ def main():
                     print(f"SKIPPED {head_cfg[0]} b={batch} ctx={ctx}: peak {fp:.1f} GB > "
                           f"{args.footprint_budget_gb} GB budget", flush=True)
                     continue
-                key = unit_key(head_cfg[0], batch, ctx, args.dtype)
-                if run.done(key):
-                    print(f"\n=== {key}  already measured, skipping", flush=True)
-                    continue
-                print(f"\n=== {head_cfg[0]} b={batch} ctx={ctx} {args.dtype} "
-                      f"({fp:.2f} GB peak)", flush=True)
-                # the whole ladder is one unit: ordering_drift reads its closing head-major
-                # rung against its opening one, and a restart between them would measure the
-                # restart
-                for r in run.add(key, probe_one(head_cfg, batch, ctx, args.dtype, device,
-                                                args.seed, args.warmup, args.iters, args.arms)):
-                    if r["error"]:
-                        continue
-                    print(f"  {r['arm']:18s} amort={r['amortized_call_ms']*1000:>8.2f} us  "
-                          f"{r['read_gbps']:>7.1f} GB/s  vs head-major "
-                          f"{r['vs_head_major']:.3f}", flush=True)
+                eligible.append((head_cfg, batch, ctx, fp,
+                                 unit_key(head_cfg[0], batch, ctx, args.dtype)))
+    run.declare(key for *_, key in eligible)
+
+    for head_cfg, batch, ctx, fp, key in eligible:
+        if run.done(key):
+            print(f"\n=== {key}  already measured, skipping", flush=True)
+            continue
+        print(f"\n=== {head_cfg[0]} b={batch} ctx={ctx} {args.dtype} "
+              f"({fp:.2f} GB peak)", flush=True)
+        # the whole ladder is one unit: ordering_drift reads its closing head-major rung
+        # against its opening one, and a restart between them would measure the restart
+        for r in run.add(key, probe_one(head_cfg, batch, ctx, args.dtype, device,
+                                        args.seed, args.warmup, args.iters, args.arms)):
+            if r["error"]:
+                continue
+            print(f"  {r['arm']:18s} amort={r['amortized_call_ms']*1000:>8.2f} us  "
+                  f"{r['read_gbps']:>7.1f} GB/s  vs head-major "
+                  f"{r['vs_head_major']:.3f}", flush=True)
 
     run.finish()
     print(f"\nwrote {args.out}")

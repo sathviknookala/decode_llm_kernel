@@ -122,12 +122,17 @@ def main():
 
     run = ResumableRun(args.out, env_metadata(0, cli_args=vars(args)), resume=args.resume,
                        sidecar={"l2_cache_bytes": l2, "slot_ladder": list(SLOT_LADDER)})
+    eligible = []
     for cfg in PROBE_CONFIGS:
         fp = cache_footprint_bytes(cfg.num_requests, cfg.cache_alloc_len, cfg.num_kv_heads,
                                    cfg.head_dim, cfg.dtype)
         if fp / 1e9 > args.footprint_budget_gb:
             print(f"SKIPPED {cfg.label()}: one cache set is {fp/1e9:.1f} GB", flush=True)
             continue
+        eligible.append((cfg, fp))
+    run.declare(cfg.label() for cfg, _ in eligible)
+
+    for cfg, fp in eligible:
         if run.done(cfg.label()):
             print(f"\n=== {cfg.label()}  already measured, skipping", flush=True)
             continue

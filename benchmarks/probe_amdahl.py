@@ -212,6 +212,19 @@ def main():
     run = ResumableRun(args.out, meta, resume=args.resume, unit_ok=point_measured,
                        sidecar=rung_sidecar())
 
+    # the budget test is deterministic once the weights are resident, so what this run will
+    # attempt is knowable before it attempts any of it
+    planned = []
+    for cfg in configs:
+        max_cache_len = cfg.ctx + headroom_slots(args)
+        kv_gb = dl.footprint_bytes(model.config, cfg, max_cache_len) / 1e9
+        if weights_gb + kv_gb + args.activation_reserve_gb > args.mem_budget_gb:
+            planned.append(unit_key(cfg, "", "skipped"))
+        else:
+            planned.extend(unit_key(cfg, mode, rung.label)
+                           for mode in args.modes for rung in rungs)
+    run.declare(planned)
+
     for cfg in configs:
         print(f"\n=== {cfg.label()}", flush=True)
         max_cache_len = cfg.ctx + headroom_slots(args)

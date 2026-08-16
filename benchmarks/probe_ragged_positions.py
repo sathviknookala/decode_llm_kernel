@@ -172,13 +172,17 @@ def main():
                                 "baseline_rung": {"spread": 1, "tensor_mode": SHARED}})
     # the two arms are separate experiments over the same configs, so the arm is part of the key
     arm = "fresh_args" if args.fresh_args else "held_args"
+    eligible = []
     for cfg in PROBE_CONFIGS:
         fp = cache_footprint_bytes(cfg.num_requests, cfg.cache_alloc_len, cfg.num_kv_heads,
                                    cfg.head_dim, cfg.dtype)
         if fp / 1e9 > args.footprint_budget_gb:
             print(f"SKIPPED {cfg.label()}: one cache set is {fp/1e9:.1f} GB", flush=True)
             continue
-        key = f"{cfg.label()}|{arm}"
+        eligible.append((cfg, f"{cfg.label()}|{arm}"))
+    run.declare(key for _, key in eligible)
+
+    for cfg, key in eligible:
         if run.done(key):
             print(f"\n=== {cfg.label()}  already measured, skipping", flush=True)
             continue
