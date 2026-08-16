@@ -300,14 +300,29 @@ def _triton_version():
         return None
 
 
+def _fsync_dir(dirname):
+    fd = os.open(dirname or ".", os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass  # not every filesystem allows fsync on a directory
+    finally:
+        os.close(fd)
+
+
 @contextmanager
 def _atomic(path, **open_kwargs):
-    """Write to a sibling temp file and rename over the target.
+    """Write to a sibling temp file, flush it to the platter, and rename over the target.
 
     Checkpointing rewrites the whole file once per unit rather than once per run, so a crash
     inside `open(path, "w")` would destroy every row already measured -- the exact loss resume
     exists to prevent. os.replace is atomic within a filesystem, so a reader sees the old file
     or the new one and never a half-written one.
+
+    os.replace orders the rename against the data only if the data is already durable. Without
+    the fsyncs a host crash can land the rename while the blocks behind it are still in the page
+    cache, which yields a zero-length or torn CSV -- the whole run lost, from the mechanism built
+    to lose one unit. Killing the process is survivable without this; losing the machine is not.
     """
     dirname = os.path.dirname(path)
     if dirname:
@@ -316,7 +331,10 @@ def _atomic(path, **open_kwargs):
     try:
         with open(tmp, "w", **open_kwargs) as f:
             yield f
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
+        _fsync_dir(dirname)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)

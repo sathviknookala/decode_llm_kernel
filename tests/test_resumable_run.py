@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 
@@ -254,3 +255,31 @@ def test_a_failed_write_leaves_no_temp_file_behind(out):
         write_csv(out, [{"unit": "cfg_a", "ms": Unwritable()}])
     import os
     assert not os.path.exists(out + ".tmp")
+
+
+def test_a_checkpoint_is_durable_before_it_replaces_the_last_one(out, monkeypatch):
+    """os.replace only orders the rename against data that is already on the platter. Without
+    the fsync a host crash can land the rename over blocks still in the page cache."""
+    synced, replaced = [], []
+    real_fsync, real_replace = os.fsync, os.replace
+    monkeypatch.setattr(os, "fsync", lambda fd: (synced.append(len(replaced)), real_fsync(fd))[1])
+    monkeypatch.setattr(os, "replace", lambda a, b: (replaced.append(b), real_replace(a, b))[1])
+
+    write_csv(out, [{"unit": "cfg_a", "ms": 1.0}])
+
+    assert replaced == [out]
+    assert synced == [0, 1], "expected the file fsynced before the rename and the dir after"
+
+
+def test_a_directory_that_refuses_fsync_does_not_fail_the_checkpoint(out, monkeypatch):
+    """Some filesystems reject fsync on a directory fd; that must not lose the measurement."""
+    real_fsync = os.fsync
+
+    def picky(fd):
+        if os.fstat(fd).st_mode & 0o040000:
+            raise OSError("directory fsync unsupported")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", picky)
+    write_csv(out, [{"unit": "cfg_a", "ms": 1.0}])
+    assert read_rows(out)[0]["unit"] == "cfg_a"
