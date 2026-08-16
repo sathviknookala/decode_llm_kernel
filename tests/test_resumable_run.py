@@ -4,6 +4,7 @@ import os
 import pytest
 
 from benchmarks.benchmark_utils import (
+    REPO_ROOT,
     UNIT_KEY,
     ResumableRun,
     env_path,
@@ -136,6 +137,52 @@ def test_resuming_across_two_trees_is_refused(out):
     ResumableRun(out, META).add("cfg_a", ladder("cfg_a"))
     with pytest.raises(SystemExit, match="two trees"):
         ResumableRun(out, {"git_sha": "b" * 40}, resume=True)
+
+
+def test_resuming_onto_the_same_commit_with_a_different_working_tree_is_refused(out):
+    """A sha identifies the commit, not the tree. Editing a probe without committing left the
+    sha equal on both sides, so the check passed and one CSV held rows from two behaviours."""
+    ResumableRun(out, {**META, "git_tree_digest": "d" * 64}).add("cfg_a", ladder("cfg_a"))
+    with pytest.raises(SystemExit, match="different working tree"):
+        ResumableRun(out, {**META, "git_tree_digest": "e" * 64}, resume=True)
+
+
+def test_an_unchanged_dirty_tree_still_resumes(out):
+    """Refusing every dirty tree would make resume useless mid-development; the digest is what
+    distinguishes 'uncommitted' from 'changed since those rows were measured'."""
+    meta = {**META, "git_dirty": True, "git_tree_digest": "d" * 64}
+    ResumableRun(out, meta).add("cfg_a", ladder("cfg_a"))
+    assert ResumableRun(out, meta, resume=True).done("cfg_a")
+
+
+def test_rows_measured_dirty_without_a_digest_are_refused(out):
+    """Nothing recoverable identifies the tree behind them, and default-deny is the safe
+    direction: a spurious refusal is loud, a missed one is silent."""
+    ResumableRun(out, {**META, "git_dirty": True}).add("cfg_a", ladder("cfg_a"))
+    with pytest.raises(SystemExit, match="cannot be identified"):
+        ResumableRun(out, META, resume=True)
+
+
+def test_rows_measured_clean_without_a_digest_are_not_second_guessed(out):
+    """Every committed artifact predates the digest; a clean sha does identify its tree."""
+    ResumableRun(out, META).add("cfg_a", ladder("cfg_a"))
+    assert ResumableRun(out, {**META, "git_tree_digest": "d" * 64}, resume=True).done("cfg_a")
+
+
+def test_the_tree_digest_moves_with_an_uncommitted_edit():
+    """The digest is only worth checking if it actually tracks the working tree."""
+    from benchmarks.benchmark_utils import _git_metadata
+    before = _git_metadata()
+    scratch = os.path.join(REPO_ROOT, ".resume_digest_probe.py")
+    with open(scratch, "w") as f:
+        f.write("# scratch\n")
+    try:
+        after = _git_metadata()
+    finally:
+        os.unlink(scratch)
+    assert before["git_sha"] == after["git_sha"]
+    assert before["git_tree_digest"] != after["git_tree_digest"]
+    assert _git_metadata()["git_tree_digest"] == before["git_tree_digest"]
 
 
 def test_a_flat_env_json_still_yields_its_git_sha(tmp_path):

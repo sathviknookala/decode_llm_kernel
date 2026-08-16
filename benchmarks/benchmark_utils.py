@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import json
 import math
 import os
@@ -223,6 +224,23 @@ def _nvcc_version():
     return None
 
 
+def _tree_digest(sha, porcelain):
+    """Identity of the working tree, not just of the commit it sits on.
+
+    Covers HEAD, the uncommitted diff against it, and the names of untracked files. What it
+    misses is the *content* of untracked files -- hashing those means walking build artifacts
+    and multi-GB result CSVs, so an untracked new module can still change behaviour without
+    moving the digest.
+    """
+    if sha is None:
+        return None
+    h = hashlib.sha256()
+    for part in (sha, porcelain or "", _capture(["git", "-C", REPO_ROOT, "diff", "HEAD"]) or ""):
+        h.update(part.encode())
+        h.update(b"\0")
+    return h.hexdigest()
+
+
 def _git_metadata():
     sha = _capture(["git", "-C", REPO_ROOT, "rev-parse", "HEAD"])
     porcelain = _capture(["git", "-C", REPO_ROOT, "status", "--porcelain"])
@@ -233,6 +251,7 @@ def _git_metadata():
         "git_branch": branch,
         "git_dirty": bool(dirty_files),
         "git_dirty_files": dirty_files,
+        "git_tree_digest": _tree_digest(sha, porcelain),
     }
 
 
@@ -450,13 +469,26 @@ def resume_is_safe(path, meta):
 
     Two trees' timings in one CSV, or two settings of --iters, would be compared against each
     other by every consumer of the file with nothing marking the boundary. The tree is checked
-    by sha; everything else is checked by the arguments the run was given.
+    by sha and then by working-tree digest, since a sha alone says nothing about uncommitted
+    edits; everything else is checked by the arguments the run was given.
     """
     prior = read_env_doc(env_path(path))
     prior_sha = prior.get("git_sha")
     if prior_sha and meta.get("git_sha") and prior_sha != meta["git_sha"]:
         return False, (f"existing rows were measured at {prior_sha[:12]}, this tree is "
                        f"{meta['git_sha'][:12]}; resuming would mix two trees in one CSV")
+    was_digest, now_digest = prior.get("git_tree_digest"), meta.get("git_tree_digest")
+    if was_digest and now_digest and was_digest != now_digest:
+        return False, ("existing rows were measured at the same commit but a different working "
+                       f"tree ({was_digest[:12]} -> {now_digest[:12]}); resuming would mix two "
+                       "trees in one CSV")
+    # A sha identifies the tree only when nothing is uncommitted. Rows measured dirty by code
+    # that recorded no digest cannot be shown to have come from this tree, so they are refused
+    # rather than assumed -- committing (or --out to a fresh path) is the way through.
+    if prior_sha and prior.get("git_dirty") and not was_digest:
+        return False, (f"existing rows were measured at {prior_sha[:12]} with uncommitted "
+                       "changes and no tree digest, so the tree behind them cannot be "
+                       "identified; resuming would mix two trees in one CSV")
     was, now = _measurement_args(prior.get("cli_args")), _measurement_args(meta.get("cli_args"))
     if was and now:
         changed = sorted(k for k in set(was) | set(now) if was.get(k) != now.get(k))
