@@ -5,9 +5,11 @@ import pytest
 
 from benchmarks.benchmark_utils import (
     REPO_ROOT,
+    RUN_SEGMENT,
     UNIT_KEY,
     ResumableRun,
     env_path,
+    read_env_doc,
     read_rows,
     read_run_completeness,
     resume_is_safe,
@@ -267,6 +269,36 @@ def test_a_csv_predating_unit_keys_is_measured_again_whole(out):
     run = ResumableRun(out, META, resume=True)
     assert run.rows == []
     assert not run.done("cfg_a")
+
+
+def test_each_row_names_the_process_that_measured_it(out):
+    """Which rows came from which process was unrecoverable from the CSV, so a run resumed
+    across a driver upgrade could not be split at the boundary after the fact."""
+    ResumableRun(out, META).add("cfg_a", ladder("cfg_a"))
+    ResumableRun(out, META, resume=True).add("cfg_b", ladder("cfg_b"))
+
+    by_unit = {r["unit"]: r[RUN_SEGMENT] for r in read_rows(out)}
+    assert by_unit == {"cfg_a": "0", "cfg_b": "1"}
+
+
+def test_the_resume_chain_survives_every_resume(out):
+    """resumed_onto_rows describes only the latest inheritance; three resumes reported the
+    third and lost the first two."""
+    ResumableRun(out, META).add("cfg_a", ladder("cfg_a"))
+    for i in range(1, 4):
+        ResumableRun(out, META, resume=True).add(f"cfg_{i}", ladder(f"cfg_{i}"))
+
+    chain = read_env_doc(env_path(out))["resume_chain"]
+    assert [e["segment"] for e in chain] == [0, 1, 2, 3]
+    assert [e["inherited_units"] for e in chain] == [0, 1, 2, 3]
+    assert all(e["git_sha"] == META["git_sha"] for e in chain)
+
+
+def test_a_fresh_run_is_segment_zero_with_a_one_entry_chain(out):
+    run = ResumableRun(out, META)
+    run.add("cfg_a", ladder("cfg_a"))
+    assert run.segment == 0
+    assert len(read_env_doc(env_path(out))["resume_chain"]) == 1
 
 
 def test_two_configurations_sharing_a_unit_key_is_an_error(out):

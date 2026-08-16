@@ -439,6 +439,7 @@ def write_json(path, obj):
 
 
 UNIT_KEY = "unit_key"
+RUN_SEGMENT = "run_segment"
 RESUME_HELP = ("keep whole units already measured in --out and fill in the rest; refuses if "
                "those rows came from a different tree")
 
@@ -531,8 +532,10 @@ class ResumableRun:
         # what the run that measured the inherited rows recorded about itself; a resumed run
         # that re-derives a reference the old rows were scored against would mix two of them
         self.prior_meta = {}
+        self.segment = 0
         if resume:
             self._inherit()
+        self._record_segment()
 
     def _inherit(self):
         prior_rows = read_rows(self.out)
@@ -554,6 +557,24 @@ class ResumableRun:
         print(f"# resuming {self.out}: {len(self.units)} units, {len(self.rows)} rows already "
               f"measured ({why})", flush=True)
 
+    def _record_segment(self):
+        """One entry per process that wrote to this CSV, carried forward across every resume.
+
+        resumed_onto_rows describes only the most recent inheritance, so a file resumed three
+        times reported the third and lost the first two -- and these CSVs are the deliverable.
+        """
+        chain = list(self.prior_meta.get("resume_chain") or [])
+        self.segment = (chain[-1].get("segment", 0) + 1) if chain else 0
+        chain.append({
+            "segment": self.segment,
+            "timestamp_utc": self.meta.get("timestamp_utc"),
+            "git_sha": self.meta.get("git_sha"),
+            "git_tree_digest": self.meta.get("git_tree_digest"),
+            "inherited_rows": len(self.rows),
+            "inherited_units": len(self.units),
+        })
+        self.meta["resume_chain"] = chain
+
     def done(self, unit_key):
         return unit_key in self.units
 
@@ -569,6 +590,7 @@ class ResumableRun:
                              f"configurations share a unit key and one of them will be lost")
         for r in rows:
             r[UNIT_KEY] = unit_key
+            r[RUN_SEGMENT] = self.segment
         self.rows.extend(rows)
         self.units.add(unit_key)
         self._checkpoint(False)
