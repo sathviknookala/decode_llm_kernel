@@ -464,7 +464,7 @@ def _measurement_args(cli_args):
     return {k: v for k, v in (cli_args or {}).items() if k not in RESUME_IGNORED_ARGS}
 
 
-def resume_is_safe(path, meta):
+def resume_is_safe(path, meta, *, rows=None):
     """Refuse to append onto rows that were not measured the same way.
 
     Two trees' timings in one CSV, or two settings of --iters, would be compared against each
@@ -473,6 +473,15 @@ def resume_is_safe(path, meta):
     edits; everything else is checked by the arguments the run was given.
     """
     prior = read_env_doc(env_path(path))
+    # An absent sidecar is only harmless when there is nothing to inherit. Unit-keyed rows with
+    # no provenance beside them came from a tree and a set of arguments neither check can see,
+    # so every guard below silently passes on a file it knows nothing about.
+    if not prior:
+        rows = read_rows(path) if rows is None else rows
+        if any(r.get(UNIT_KEY) for r in rows):
+            return False, (f"{os.path.basename(path)} holds finished units but "
+                           f"{os.path.basename(env_path(path))} is missing, so the tree and "
+                           "settings behind those rows cannot be checked")
     prior_sha = prior.get("git_sha")
     if prior_sha and meta.get("git_sha") and prior_sha != meta["git_sha"]:
         return False, (f"existing rows were measured at {prior_sha[:12]}, this tree is "
@@ -526,12 +535,13 @@ class ResumableRun:
             self._inherit()
 
     def _inherit(self):
-        safe, why = resume_is_safe(self.out, self.meta)
+        prior_rows = read_rows(self.out)
+        safe, why = resume_is_safe(self.out, self.meta, rows=prior_rows)
         if not safe:
             raise SystemExit(f"--resume refused: {why}")
         self.prior_meta = read_env_doc(env_path(self.out))
         groups = {}
-        for r in read_rows(self.out):
+        for r in prior_rows:
             groups.setdefault(r.get(UNIT_KEY, ""), []).append(r)
         # A CSV predating this column keys every row to "" and is re-measured whole, which is
         # the safe direction: no committed artifact carries unit boundaries.

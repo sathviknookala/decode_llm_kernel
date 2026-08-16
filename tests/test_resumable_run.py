@@ -269,6 +269,23 @@ def test_a_csv_predating_unit_keys_is_measured_again_whole(out):
     assert not run.done("cfg_a")
 
 
+def test_finished_units_with_no_sidecar_at_all_are_refused(out):
+    """Deleting env.json turned every guard off at once: no sha, no digest, no arguments, and
+    resume_is_safe reporting 'no prior provenance' as a pass."""
+    ResumableRun(out, META).add("cfg_a", ladder("cfg_a"))
+    os.unlink(env_path(out))
+    with pytest.raises(SystemExit, match="cannot be checked"):
+        ResumableRun(out, META, resume=True)
+
+
+def test_a_csv_with_no_units_and_no_sidecar_is_still_a_fresh_start(out):
+    """An absent sidecar is only a problem when there is something to inherit; the committed
+    artifacts carry no unit_key and are re-measured whole either way."""
+    write_csv(out, [{"unit": "cfg_a", "rung": 0, "ms": 1.0}])
+    run = ResumableRun(out, META, resume=True)
+    assert run.rows == []
+
+
 def test_a_sidecar_lagging_behind_the_csv_still_resumes(out):
     """Completeness is read from the CSV's own unit_key column, so a crash landing between the
     two writes costs nothing."""
