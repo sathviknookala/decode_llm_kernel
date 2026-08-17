@@ -536,6 +536,22 @@ def claim_output(out):
     raise SystemExit(f"could not claim {path}")
 
 
+def preflight_output(out, cli_args, *, resume):
+    """Claim the path and settle resume safety before an expensive setup step.
+
+    probe_amdahl loads ~14 GB of weights before it reaches ResumableRun, so a duplicate launch
+    allocated a second copy on the same GPU and could OOM the run it was on its way to being
+    refused beside. Same-pid reclaim is allowed, so the later ResumableRun re-claims freely.
+    """
+    release = claim_output(out)
+    if resume:
+        safe, why = resume_is_safe(out, {**_git_metadata(), "cli_args": cli_args})
+        if not safe:
+            release()
+            raise SystemExit(f"--resume refused: {why}")
+    return release
+
+
 def _release_output(path, pid, host):
     if _lock_owner(path).get("pid") == pid and _lock_owner(path).get("host") == host:
         try:

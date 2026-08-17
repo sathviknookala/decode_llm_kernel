@@ -1,3 +1,6 @@
+import inspect
+import json
+
 import pytest
 
 from benchmarks.benchmark_utils import ResumableRun, env_path, write_json
@@ -71,3 +74,31 @@ def test_resuming_across_two_trees_is_refused(partial):
     write_json(env_path(partial), {"environment": {"git_sha": "b" * 40}})
     with pytest.raises(SystemExit, match="two trees"):
         ResumableRun(partial, META, resume=True, unit_ok=point_measured)
+
+
+def test_the_output_is_claimed_before_the_weights_are_loaded(tmp_path):
+    """A duplicate launch used to allocate a second ~14 GB copy on the GPU and only then be
+    refused, which can OOM the run it was colliding with rather than the one colliding."""
+    import benchmarks.probe_amdahl as pa
+    src = inspect.getsource(pa.main)
+    assert src.index("preflight_output") < src.index("dl.load_model"), \
+        "the lock must be claimed before the model load, not after"
+
+
+def test_preflight_refuses_a_second_writer_without_loading_anything(tmp_path):
+    from benchmarks.benchmark_utils import lock_path, preflight_output
+    out = str(tmp_path / "amdahl.csv")
+    with open(lock_path(out), "w") as f:
+        json.dump({"pid": 999_999, "host": "otherbox", "since": "earlier"}, f)
+    with pytest.raises(SystemExit, match="already being written"):
+        preflight_output(out, {"iters": 1}, resume=False)
+
+
+def test_preflight_refuses_an_unsafe_resume_before_loading_anything(tmp_path):
+    from benchmarks.benchmark_utils import env_path, preflight_output, write_csv, write_json
+    out = str(tmp_path / "amdahl.csv")
+    write_csv(out, [{"unit_key": "cfg_a", "ms": 1.0}])
+    write_json(env_path(out), {"environment": {"git_sha": "b" * 40,
+                                               "timestamp_utc": "2026-01-01T00:00:00+00:00"}})
+    with pytest.raises(SystemExit, match="--resume refused"):
+        preflight_output(out, {"iters": 1}, resume=True)

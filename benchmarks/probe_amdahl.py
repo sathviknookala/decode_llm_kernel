@@ -20,6 +20,7 @@ from benchmarks.benchmark_utils import (
     UNIT_KEY,
     ResumableRun,
     env_metadata,
+    preflight_output,
     record_gpu_state_end,
     time_amortized_call,
     time_synchronized_call,
@@ -192,6 +193,10 @@ def main():
         ctxs = args.ctxs or [1024]
         configs = [dl.DecodeConfig(args.model, b, c) for b in batches for c in ctxs]
     rungs = resolve_rungs(args.rungs)
+
+    # before the weights, not after: a duplicate launch must be refused without first putting a
+    # second copy of the model on the GPU beside the run it would collide with
+    preflight_output(args.out, vars(args), resume=args.resume)
 
     print(f"loading {args.model} ...", flush=True)
     model = dl.load_model(dl.DecodeConfig(args.model, 1, 1), device="cuda")
