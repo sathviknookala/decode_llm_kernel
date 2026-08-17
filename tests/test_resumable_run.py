@@ -280,6 +280,34 @@ def test_a_fresh_output_path_resumes_trivially(out):
     assert not run.done("cfg_a")
 
 
+def test_a_fresh_run_truncates_a_previous_run_s_csv(out):
+    """write_csv returned early on an empty row set, so declare() left the old rows on disk
+    beside the new run's sidecar."""
+    first = ResumableRun(out, META)
+    first.add("cfg_a", ladder("cfg_a"))
+    first.finish()
+
+    second = ResumableRun(out, META)
+    second.declare(["cfg_b"])
+    assert read_rows(out) == []
+
+
+def test_a_fresh_run_then_a_resume_cannot_inherit_the_older_run_s_rows(out):
+    """The sequence that got past every guard: run A at one setting; run B fresh on the same
+    path, killed in warmup after declare(); run C resuming B. B's sidecar made A's rows look
+    like B's own, so C compared B's provenance against itself and passed."""
+    a = ResumableRun(out, {**META, "cli_args": {"iters": 100}})
+    a.add("cfg_a", ladder("cfg_a"))
+    a.finish()
+
+    b = ResumableRun(out, {**META, "cli_args": {"iters": 500}})
+    b.declare(["cfg_a"])
+
+    c = ResumableRun(out, {**META, "cli_args": {"iters": 500}}, resume=True)
+    assert not c.done("cfg_a")
+    assert c.rows == []
+
+
 def test_a_csv_predating_unit_keys_is_measured_again_whole(out):
     """Every committed artifact was written before restart boundaries were recorded, so there
     is no way to tell which of its rows belong to a finished unit."""

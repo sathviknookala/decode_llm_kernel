@@ -377,7 +377,12 @@ def _atomic(path, **open_kwargs):
 
 
 def write_csv(path, rows):
+    # An empty row set truncates rather than returning. Returning left a previous run's CSV on
+    # disk beside the new run's sidecar, and every resume guard then compared the new run's
+    # provenance against itself and passed.
     if not rows:
+        with _atomic(path, newline=""):
+            pass
         return
     fields = []
     for r in rows:
