@@ -434,7 +434,9 @@ def ordering_drift(rows, value_col, *, group_col="impl", rung_col="rung_index"):
                          key=lambda r: r[rung_col])
         baselines = [r for r in members if r.get("is_baseline_rung")]
         drift = ""
-        if len(baselines) > 1 and baselines[0][value_col]:
+        # both ends, not just the opening one: a probe records an unrunnable arm as a row with
+        # an empty timing, and "" / float raised rather than reporting no drift
+        if len(baselines) > 1 and baselines[0][value_col] and baselines[-1][value_col]:
             drift = baselines[-1][value_col] / baselines[0][value_col]
         for r in members:
             r["ordering_drift"] = drift

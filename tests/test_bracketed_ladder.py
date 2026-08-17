@@ -58,3 +58,15 @@ def test_an_unbracketed_ladder_reports_no_drift_rather_than_one():
 def test_drift_reads_rungs_by_index_not_by_list_order():
     rows = [_row("c", 2, 0.008, True), _row("c", 1, 0.009), _row("c", 0, 0.010, True)]
     assert ordering_drift(rows, "amortized_call_ms")[0]["ordering_drift"] == pytest.approx(0.8)
+
+
+def test_an_errored_closing_rung_reports_no_drift_rather_than_raising():
+    """probe_cache_read records an unrunnable arm as a row with an empty timing, and the
+    closing rung is a baseline. Dividing "" by a float aborted the whole probe."""
+    rows = [_row("c", 0, 0.010, True), _row("c", 1, 0.008), _row("c", 2, "", True)]
+    assert all(r["ordering_drift"] == "" for r in ordering_drift(rows, "amortized_call_ms"))
+
+
+def test_an_errored_opening_rung_also_reports_no_drift():
+    rows = [_row("c", 0, "", True), _row("c", 1, 0.008), _row("c", 2, 0.010, True)]
+    assert all(r["ordering_drift"] == "" for r in ordering_drift(rows, "amortized_call_ms"))
