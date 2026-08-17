@@ -96,3 +96,27 @@ def test_resume_segments_are_reported_once_there_is_more_than_one(out):
     text = render(status(out, tree=TREE))
     assert "written across 2 processes" in text
     assert "segment 1: 1 rows" in text
+
+
+def test_units_that_would_not_survive_a_resume_are_reported_as_such(out):
+    """run_status counted every keyed unit, ignoring the probe's unit_ok, so it answered
+    '64 units, would resume' for a file whose resume re-measures three of them."""
+    timed = lambda rows: any(r["ms"] for r in rows)
+    run = ResumableRun(out, META, unit_ok=timed)
+    run.declare(["cfg_a", "cfg_b"])
+    run.add("cfg_a", [{"unit": "cfg_a", "ms": 1.0}])
+    run.add("cfg_b", [{"unit": "cfg_b", "ms": ""}])
+    run.finish()
+
+    s = status(out, tree=TREE)
+    assert s["units"] == 2
+    assert s["units_inheritable"] == 1
+    assert "only 1 of those would be inherited" in render(s)
+
+
+def test_a_file_whose_units_all_survive_says_nothing_extra(out):
+    run = partial(out, done=2, planned=2)
+    run.finish()
+    s = status(out, tree=TREE)
+    assert s["units_inheritable"] == 2
+    assert "would be inherited" not in render(s)

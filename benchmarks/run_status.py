@@ -55,6 +55,8 @@ def status(out, *, tree=None):
         "out": out,
         "rows": len(rows),
         "units": len(keyed),
+        # what a resume would actually adopt, which is fewer when a unit recorded only failures
+        "units_inheritable": doc.get("units_inheritable"),
         "unkeyed_rows": sum(1 for u in units if not u),
         "complete": doc.get("complete"),
         "covered": doc.get("covered"),
@@ -89,6 +91,11 @@ def render(s, *, show_all_missing=False):
     unkeyed = (f", {s['unkeyed_rows']} rows predating unit keys (a resume re-measures those "
                f"whole)" if s["unkeyed_rows"] else "")
     lines.append(f"  {s['rows']} rows in {s['units']} finished units{unkeyed}")
+    inheritable = s["units_inheritable"]
+    if inheritable is not None and inheritable != s["units"]:
+        lines.append(f"  only {inheritable} of those would be inherited: "
+                     f"{s['units'] - inheritable} recorded no usable measurement and a resume "
+                     f"retries them")
 
     if s["complete"] is None:
         lines.append("  complete: unrecorded (written before the flag existed)")

@@ -707,6 +707,12 @@ class ResumableRun:
             return []
         return [k for k in self.planned if k not in self.units]
 
+    def _by_unit(self):
+        grouped = {}
+        for r in self.rows:
+            grouped.setdefault(r.get(UNIT_KEY, ""), []).append(r)
+        return grouped
+
     def done(self, unit_key):
         return unit_key in self.units
 
@@ -747,6 +753,11 @@ class ResumableRun:
             absent = self.missing()
             coverage = {"units_planned": len(self.planned), "units_missing": absent,
                         "covered": not absent}
+        # A unit that recorded only failures is written but would not survive its own resume.
+        # Only the run holds both the rows and the predicate, so it answers this here rather
+        # than leaving a reader to guess which probe's unit_ok applies.
+        coverage["units_inheritable"] = sum(1 for rows in self._by_unit().values()
+                                            if self.unit_ok(rows))
         write_csv(self.out, self.rows)
         write_json(env_path(self.out),
                    {"environment": self.meta, "complete": complete,
