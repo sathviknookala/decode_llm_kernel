@@ -174,6 +174,21 @@ def test_rows_measured_clean_without_a_digest_are_not_second_guessed(out):
     assert ResumableRun(out, {**META, "git_tree_digest": "d" * 64}, resume=True).done("cfg_a")
 
 
+def test_a_run_writing_its_own_output_does_not_move_the_digest():
+    """Caught on the first real run into results/raw/: the sweep's own untracked CSV changed the
+    digest from 9e5689ac to 278631d7, so --resume refused the run it had just checkpointed. The
+    earlier kill test missed it by writing to /tmp, outside the repo."""
+    from benchmarks.benchmark_utils import _git_metadata
+    before = _git_metadata()
+    artifact = os.path.join(REPO_ROOT, "results/raw/.digest_probe.csv")
+    with open(artifact, "w") as f:
+        f.write("unit_key,ms\ncfg_a,1.0\n")
+    try:
+        assert _git_metadata()["git_tree_digest"] == before["git_tree_digest"]
+    finally:
+        os.unlink(artifact)
+
+
 def test_the_tree_digest_moves_with_an_uncommitted_edit():
     """The digest is only worth checking if it actually tracks the working tree."""
     from benchmarks.benchmark_utils import _git_metadata

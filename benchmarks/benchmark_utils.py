@@ -225,18 +225,34 @@ def _nvcc_version():
     return None
 
 
+ARTIFACT_DIR = "results/"
+
+
+def _code_porcelain(porcelain):
+    """Untracked entries minus the artifact directory.
+
+    A run's own CSV and sidecar are untracked files inside the repo, so counting them would let
+    every run invalidate its own tree digest the moment it writes its first checkpoint -- and
+    refuse the resume it just made necessary. Outputs are not inputs to a measurement.
+    """
+    return "\n".join(
+        line for line in (porcelain or "").splitlines()
+        if not (line.startswith("??") and line[2:].strip().startswith(ARTIFACT_DIR)))
+
+
 def _tree_digest(sha, porcelain):
     """Identity of the working tree, not just of the commit it sits on.
 
-    Covers HEAD, the uncommitted diff against it, and the names of untracked files. What it
-    misses is the *content* of untracked files -- hashing those means walking build artifacts
-    and multi-GB result CSVs, so an untracked new module can still change behaviour without
-    moving the digest.
+    Covers HEAD, the uncommitted diff against it, and the names of untracked files outside
+    results/. What it misses is the *content* of untracked files -- hashing those means walking
+    build artifacts and multi-GB result CSVs, so an untracked new module can still change
+    behaviour without moving the digest.
     """
     if sha is None:
         return None
     h = hashlib.sha256()
-    for part in (sha, porcelain or "", _capture(["git", "-C", REPO_ROOT, "diff", "HEAD"]) or ""):
+    for part in (sha, _code_porcelain(porcelain),
+                 _capture(["git", "-C", REPO_ROOT, "diff", "HEAD"]) or ""):
         h.update(part.encode())
         h.update(b"\0")
     return h.hexdigest()
