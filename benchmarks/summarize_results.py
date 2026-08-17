@@ -122,13 +122,15 @@ def fusion_ablation_summary(entries):
     by_batch = []
     for b in sorted({e["num_requests"] for e in entries}):
         group = [e for e in entries if e["num_requests"] == b]
+        batch_ceiling = [e["fused_vs_ceiling"] for e in group if "fused_vs_ceiling" in e]
         by_batch.append({
             "num_requests": b, "n": len(group),
             "separate_us": st.median([e["separate_us"] for e in group]),
             "fused_us": st.median([e["fused_us"] for e in group]),
             "fusion_speedup": st.median([e["fusion_speedup"] for e in group]),
-            "fused_vs_ceiling": st.median([e["fused_vs_ceiling"] for e in group
-                                           if "fused_vs_ceiling" in e]) if ceiling else None,
+            # guarded on this batch's own rows, not on the global flag: a ceiling that failed
+            # validation at one batch size left the median with nothing to take
+            "fused_vs_ceiling": st.median(batch_ceiling) if batch_ceiling else None,
         })
     return {
         "n": len(entries),
@@ -583,18 +585,25 @@ def render_markdown(s):
                     f"The realizable figure is the doubling slope: **{g['realizable_pct']:.2f}%** "
                     f"({g['realizable_per_layer_us']:.1f} us per layer). Treat "
                     f"{g['saving_pct']:.2f}% as an upper bound that is not achievable.",
-                    "",
-                    f"Mirror ratio is **{g['mirror_ratio']:.3f}** against a {g['mirror_cutoff']} "
-                    f"cutoff, so the demotion holds for any cutoff above "
-                    f"{g['mirror_ratio']:.3f}. The cutoff was chosen after seeing the data; this "
-                    "ratio is what lets a reader judge how much that choice mattered."]
+                    ""]
+            out += ([f"Mirror ratio is **{g['mirror_ratio']:.3f}** against a "
+                     f"{g['mirror_cutoff']} cutoff, so the demotion holds for any cutoff above "
+                     f"{g['mirror_ratio']:.3f}. The cutoff was chosen after seeing the data; "
+                     "this ratio is what lets a reader judge how much that choice mattered."]
+                    if g["mirror_ratio"] is not None else
+                    ["No mirror ratio: this CSV has no `op_doubled` rows, so the validity check "
+                     "is unrun rather than failed. The removal saving above is an upper bound "
+                     "with nothing bounding it from below."])
         if g.get("noise_pct") is not None:
             res = ("above" if g.get("doubling_resolved") else "**inside**")
+            doubling_clause = ("the doubling was not measured"
+                               if g["doubled_cost_pct"] is None
+                               else f"the doubling ({g['doubled_cost_pct']:+.2f}%) is {res} it")
             out += ["",
                     f"Repeat spread at this configuration is {g['noise_pct']:.2f}% of a step. The "
                     f"removal ({g['saving_pct']:.2f}%) is "
-                    f"{'above' if g.get('removal_resolved') else 'inside'} it; the doubling "
-                    f"({g['doubled_cost_pct']:+.2f}%) is {res} it."]
+                    f"{'above' if g.get('removal_resolved') else 'inside'} it; "
+                    f"{doubling_clause}."]
             if not g.get("doubling_resolved"):
                 out += ["",
                         "So the realizable figure is bounded by the instrument, not measured by "

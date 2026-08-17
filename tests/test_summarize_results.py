@@ -583,3 +583,42 @@ def test_the_ablation_section_carries_the_amdahl_caveat():
     assert "Fusion ablation" in md
     assert "not a decode-latency result" in md
     assert "0.0-0.9%" in md
+
+
+def test_a_csv_with_no_doubling_rows_renders_instead_of_crashing(tmp_path):
+    """`probe_amdahl.py --rungs full op_removed` is a natural partial re-run. amdahl_gate
+    supports it (mirror_ratio None) but the renderer formatted that None with :.3f and took
+    the whole summary down."""
+    base = write_csv(tmp_path, [row("eager", 1.0), row("compile", 0.5)])
+    amdahl = write_amdahl(tmp_path, [
+        amdahl_row("hf_static_graph", "full", 100.0),
+        amdahl_row("hf_static_graph", "op_removed", 97.0),
+    ])
+    text = render_markdown(build_summary(base, {}, None, amdahl))
+    assert "not measured" in text
+    assert "unrun rather than failed" in text
+
+
+def test_a_csv_with_no_doubling_but_a_spread_still_renders(tmp_path):
+    """The other half: the repeat-spread paragraph formatted doubled_cost_pct unguarded."""
+    base = write_csv(tmp_path, [row("eager", 1.0), row("compile", 0.5)])
+    amdahl = write_amdahl(tmp_path, [
+        amdahl_row("hf_static_graph", "full", 100.0, spread=0.4),
+        amdahl_row("hf_static_graph", "op_removed", 97.0, spread=0.4),
+    ])
+    text = render_markdown(build_summary(base, {}, None, amdahl))
+    assert "the doubling was not measured" in text
+
+
+def test_a_batch_with_no_ceiling_rows_does_not_empty_the_median(tmp_path):
+    """A ceiling that fails validation at one batch size is dropped by the pass filter. The
+    per-batch median was guarded on a global flag, so it took the median of an empty list."""
+    from benchmarks.summarize_results import fusion_ablation_summary
+    got = fusion_ablation_summary([
+        {"num_requests": 1, "separate_us": 5.8, "fused_us": 3.2,
+         "fusion_speedup": 1.81, "fused_vs_ceiling": 0.54},
+        {"num_requests": 128, "separate_us": 10.7, "fused_us": 6.7, "fusion_speedup": 1.62},
+    ])
+    by_batch = {e["num_requests"]: e for e in got["by_batch"]}
+    assert by_batch[1]["fused_vs_ceiling"] == pytest.approx(0.54)
+    assert by_batch[128]["fused_vs_ceiling"] is None
