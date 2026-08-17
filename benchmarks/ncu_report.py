@@ -59,13 +59,24 @@ def aggregate(rows):
     """
     totals = {}
     per_kernel = {}
+    # ncu emits one row per (launch, metric), so a single metric's row count is the launch
+    # count. max over metrics rather than any one of them, in case a metric is unavailable for
+    # some launches; dividing the total by the metric count would understate it the same way.
+    rows_per_metric = {}
+    launches_per_kernel = {}
     for r in rows:
         totals[r["metric"]] = totals.get(r["metric"], 0.0) + r["value"]
         per_kernel.setdefault(r["kernel"], {})
         k = per_kernel[r["kernel"]]
         k[r["metric"]] = k.get(r["metric"], 0.0) + r["value"]
+        rows_per_metric[r["metric"]] = rows_per_metric.get(r["metric"], 0) + 1
+        launches_per_kernel.setdefault(r["kernel"], {})
+        lk = launches_per_kernel[r["kernel"]]
+        lk[r["metric"]] = lk.get(r["metric"], 0) + 1
     return {"totals": totals, "per_kernel": per_kernel,
-            "kernel_launches": len({(r["kernel"], i) for i, r in enumerate(rows)})}
+            "kernel_launches": max(rows_per_metric.values(), default=0),
+            "launches_per_kernel": {k: max(v.values(), default=0)
+                                    for k, v in launches_per_kernel.items()}}
 
 
 def measured_bytes(totals):

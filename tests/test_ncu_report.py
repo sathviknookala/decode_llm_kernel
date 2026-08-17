@@ -114,3 +114,35 @@ def test_a_dram_ratio_below_one_is_what_l2_service_looks_like():
 def test_a_zero_logical_count_leaves_the_ratio_blank():
     got = compare(measured_bytes({DRAM_READ: 1.0}), {"total_bytes": 0})
     assert got["dram_over_logical"] == ""
+
+
+def _metric_rows(kernel, launches, metrics=("dram__bytes_read.sum", "dram__bytes_write.sum")):
+    return [{"kernel": kernel, "metric": m, "unit": "byte", "value": 1.0}
+            for _ in range(launches) for m in metrics]
+
+
+def test_kernel_launches_counts_launches_not_metric_rows():
+    """The set was keyed by the enumeration index, so every tuple was unique and the count was
+    always len(rows) -- a 5x overcount with the metric list ncu_capture.sh requests."""
+    got = aggregate(_metric_rows("k", launches=3))
+    assert got["kernel_launches"] == 3
+
+
+def test_launch_count_is_per_metric_not_summed_across_metrics():
+    got = aggregate(_metric_rows("k", launches=1, metrics=("a", "b", "c", "d", "e")))
+    assert got["kernel_launches"] == 1
+
+
+def test_launches_are_counted_across_distinct_kernels():
+    got = aggregate(_metric_rows("k1", 2) + _metric_rows("k2", 3))
+    assert got["launches_per_kernel"] == {"k1": 2, "k2": 3}
+    assert got["kernel_launches"] == 5
+
+
+def test_a_metric_missing_from_some_launches_does_not_undercount():
+    rows = _metric_rows("k", 4) + [{"kernel": "k", "metric": "rare", "unit": "", "value": 1.0}]
+    assert aggregate(rows)["kernel_launches"] == 4
+
+
+def test_no_rows_is_zero_launches():
+    assert aggregate([])["kernel_launches"] == 0
