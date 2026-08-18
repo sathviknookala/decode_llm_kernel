@@ -44,13 +44,19 @@ def summarize_trace(trace_path, iters):
         trace = json.load(f)
     events = [e for e in trace.get("traceEvents", [])
               if e.get("cat") in DEVICE_CATEGORIES and e.get("ph") == "X"]
-    per_name = {}
+    kernels = [e for e in events if e.get("cat") == "kernel"]
+    device_by_name = {}
     for e in events:
+        rec = device_by_name.setdefault(e.get("name", "?"), {"total_us": 0.0})
+        rec["total_us"] += float(e.get("dur", 0.0))
+    total_us = sum(r["total_us"] for r in device_by_name.values())
+    # keyed off kernels alone: these two fields say "kernel", and a Memcpy DtoD counted among
+    # them reported 3 distinct kernels for a compiled path that launches 2 per invocation
+    per_name = {}
+    for e in kernels:
         rec = per_name.setdefault(e.get("name", "?"), {"count": 0, "total_us": 0.0})
         rec["count"] += 1
         rec["total_us"] += float(e.get("dur", 0.0))
-    total_us = sum(r["total_us"] for r in per_name.values())
-    kernels = [e for e in events if e.get("cat") == "kernel"]
     return {
         "device_events_total": len(events),
         "kernel_events_total": len(kernels),
