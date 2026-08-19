@@ -1,0 +1,436 @@
+{
+  "environment": {
+    "timestamp_utc": "2026-08-19T02:39:50.060356+00:00",
+    "gpu_name": "NVIDIA RTX PRO 4000 Blackwell",
+    "gpu_vram_bytes": 25151537152,
+    "gpu_vram_gib": 23.42,
+    "gpu_compute_capability": "12.0",
+    "gpu_multi_processor_count": 70,
+    "device_index": 0,
+    "nvidia_driver_version": "575.64.03",
+    "cuda_runtime_version_torch": "12.8",
+    "cuda_toolkit_version_nvcc": "12.9.86",
+    "cudnn_version": 91900,
+    "torch_version": "2.11.0+cu128",
+    "triton_version": "3.6.0",
+    "python_version": "3.12.13",
+    "python_executable": "/home/sathvik/miniconda3/envs/cu/bin/python",
+    "os_platform": "Linux-6.8.0-65-generic-x86_64-with-glibc2.35",
+    "os_system": "Linux",
+    "kernel_release": "6.8.0-65-generic",
+    "cli_args": {
+      "iters": 20,
+      "warmup": 25,
+      "seed": 1234,
+      "outdir": "results/profiling/kernels",
+      "compile_backend": "inductor",
+      "compile_mode": null,
+      "device_index": 0,
+      "lock_clocks": false,
+      "impls": [
+        "cuda_separate",
+        "cuda_fused"
+      ],
+      "single": null,
+      "single_batch": 32,
+      "no_trace": false
+    },
+    "gpu_state_start": {
+      "clocks.sm": "22",
+      "clocks.mem": "405",
+      "temperature.gpu": "37",
+      "power.draw": "6.53",
+      "clocks_throttle_reasons.active": "0x0000000000000004"
+    },
+    "git_sha": "d32af14c6cf2cd9eb6647d227778582e4e910c15",
+    "git_branch": "main",
+    "git_dirty": false,
+    "git_dirty_files": [],
+    "git_tree_digest": "beae8462408ee3fa3bc87871b9e1494083e57d419cfa3c400aa63094822ac7ce",
+    "dynamo.recompile_limit": 8,
+    "dynamo.cache_size_limit": 8,
+    "dynamo.accumulated_recompile_limit": 256,
+    "dynamo.assume_static_by_default": true,
+    "dynamo.automatic_dynamic_shapes": true,
+    "dynamo.suppress_errors": false,
+    "inductor.max_autotune": false,
+    "inductor.coordinate_descent_tuning": false,
+    "inductor.freezing": false,
+    "inductor.debug": false,
+    "inductor.triton.cudagraphs": false,
+    "clock_lock": {
+      "requested": false,
+      "locked": false,
+      "target_sm_mhz": null
+    },
+    "gpu_state_end": {
+      "clocks.sm": "22",
+      "clocks.mem": "405",
+      "temperature.gpu": "37",
+      "power.draw": "21.23",
+      "clocks_throttle_reasons.active": "0x0000000000000000"
+    }
+  },
+  "summaries": [
+    {
+      "device_events_total": 40,
+      "kernel_events_total": 40,
+      "kernels_per_invocation": 2.0,
+      "device_time_total_us": 56.259000000000015,
+      "device_time_per_invocation_us": 2.8129500000000007,
+      "distinct_kernels": 2,
+      "by_kernel": [
+        {
+          "name": "void decode_kernels::(anonymous namespace)::rope_kernel<c10::BFloat16, long>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, float const*, float const*, long const*, long, int, int, int, long, long, long, long, long, long)",
+          "count": 20,
+          "total_us": 29.122000000000007,
+          "per_invocation": 1.0
+        },
+        {
+          "name": "void decode_kernels::(anonymous namespace)::kv_append_kernel<c10::BFloat16, long>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, long const*, long const*, long, int, int, long, long, long, long, long, long)",
+          "count": 20,
+          "total_us": 27.137000000000004,
+          "per_invocation": 1.0
+        }
+      ],
+      "impl": "cuda_separate",
+      "config": "mha_b1_alloc2048_bf16_ragged",
+      "head_label": "mha",
+      "num_q_heads": 32,
+      "num_kv_heads": 32,
+      "head_dim": 128,
+      "num_requests": 1,
+      "cache_alloc_len": 2048,
+      "dtype_label": "bf16",
+      "position_mode": "ragged",
+      "layout": "packed",
+      "request_mapping": "identity",
+      "profiled_iters": 20,
+      "warmup": 25,
+      "trace": "results/profiling/kernels/trace_cuda_separate_mha_b1_alloc2048_bf16_ragged.json",
+      "top_ops_by_self_device_time": [
+        {
+          "op": "void decode_kernels::(anonymous namespace)::rope_kernel<c10::BFloat16, long>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, float const*, float const*, long const*, long, int, int, int, long, long, long, long, long, long)",
+          "count": 20,
+          "self_device_us": 29.122000000000526,
+          "total_device_us": 29.122000000000526
+        },
+        {
+          "op": "void decode_kernels::(anonymous namespace)::kv_append_kernel<c10::BFloat16, long>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, long const*, long const*, long, int, int, long, long, long, long, long, long)",
+          "count": 20,
+          "self_device_us": 27.136999999999944,
+          "total_device_us": 27.136999999999944
+        }
+      ]
+    },
+    {
+      "device_events_total": 20,
+      "kernel_events_total": 20,
+      "kernels_per_invocation": 1.0,
+      "device_time_total_us": 30.080000000000013,
+      "device_time_per_invocation_us": 1.5040000000000007,
+      "distinct_kernels": 1,
+      "by_kernel": [
+        {
+          "name": "void decode_kernels::(anonymous namespace)::fused_rope_kv_append_kernel<c10::BFloat16, long>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, c10::BFloat16*, float const*, float const*, long const*, long const*, long, int, int, int, long, long, long, long, long, long, long, long, long, long)",
+          "count": 20,
+          "total_us": 30.080000000000013,
+          "per_invocation": 1.0
+        }
+      ],
+      "impl": "cuda_fused",
+      "config": "mha_b1_alloc2048_bf16_ragged",
+      "head_label": "mha",
+      "num_q_heads": 32,
+      "num_kv_heads": 32,
+      "head_dim": 128,
+      "num_requests": 1,
+      "cache_alloc_len": 2048,
+      "dtype_label": "bf16",
+      "position_mode": "ragged",
+      "layout": "packed",
+      "request_mapping": "identity",
+      "profiled_iters": 20,
+      "warmup": 25,
+      "trace": "results/profiling/kernels/trace_cuda_fused_mha_b1_alloc2048_bf16_ragged.json",
+      "top_ops_by_self_device_time": [
+        {
+          "op": "void decode_kernels::(anonymous namespace)::fused_rope_kv_append_kernel<c10::BFloat16, long>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, c10::BFloat16*, float const*, float const*, long const*, long const*, long, int, int, int, long, long, long, long, long, long, long, long, long, long)",
+          "count": 20,
+          "self_device_us": 30.079999999999956,
+          "total_device_us": 30.079999999999956
+        }
+      ]
+    },
+    {
+      "device_events_total": 40,
+      "kernel_events_total": 40,
+      "kernels_per_invocation": 2.0,
+      "device_time_total_us": 117.41,
+      "device_time_per_invocation_us": 5.8705,
+      "distinct_kernels": 2,
+      "by_kernel": [
+        {
+          "name": "void decode_kernels::(anonymous namespace)::rope_kernel<c10::BFloat16, long>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, float const*, float const*, long const*, long, int, int, int, long, long, long, long, long, long)",
+          "count": 20,
+          "total_us": 59.361000000000004,
+          "per_invocation": 1.0
+        },
+        {
+          "name": "void decode_kernels::(anonymous namespace)::kv_append_kernel<c10::BFloat16, long>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, long const*, long const*, long, int, int, long, long, long, long, long, long)",
+          "count": 20,
+          "total_us": 58.049,
+          "per_invocation": 1.0
+        }
+      ],
+      "impl": "cuda_separate",
+      "config": "mha_b32_alloc2048_bf16_ragged",
+      "head_label": "mha",
+      "num_q_heads": 32,
+      "num_kv_heads": 32,
+      "head_dim": 128,
+      "num_requests": 32,
+      "cache_alloc_len": 2048,
+      "dtype_label": "bf16",
+      "position_mode": "ragged",
+      "layout": "packed",
+      "request_mapping": "identity",
+      "profiled_iters": 20,
+      "warmup": 25,
+      "trace": "results/profiling/kernels/trace_cuda_separate_mha_b32_alloc2048_bf16_ragged.json",
+      "top_ops_by_self_device_time": [
+        {
+          "op": "void decode_kernels::(anonymous namespace)::rope_kernel<c10::BFloat16, long>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, float const*, float const*, long const*, long, int, int, int, long, long, long, long, long, long)",
+          "count": 20,
+          "self_device_us": 59.361000000000146,
+          "total_device_us": 59.361000000000146
+        },
+        {
+          "op": "void decode_kernels::(anonymous namespace)::kv_append_kernel<c10::BFloat16, long>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, long const*, long const*, long, int, int, long, long, long, long, long, long)",
+          "count": 20,
+          "self_device_us": 58.049000000000206,
+          "total_device_us": 58.049000000000206
+        }
+      ]
+    },
+    {
+      "device_events_total": 20,
+      "kernel_events_total": 20,
+      "kernels_per_invocation": 1.0,
+      "device_time_total_us": 71.87200000000001,
+      "device_time_per_invocation_us": 3.593600000000001,
+      "distinct_kernels": 1,
+      "by_kernel": [
+        {
+          "name": "void decode_kernels::(anonymous namespace)::fused_rope_kv_append_kernel<c10::BFloat16, long>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, c10::BFloat16*, float const*, float const*, long const*, long const*, long, int, int, int, long, long, long, long, long, long, long, long, long, long)",
+          "count": 20,
+          "total_us": 71.87200000000001,
+          "per_invocation": 1.0
+        }
+      ],
+      "impl": "cuda_fused",
+      "config": "mha_b32_alloc2048_bf16_ragged",
+      "head_label": "mha",
+      "num_q_heads": 32,
+      "num_kv_heads": 32,
+      "head_dim": 128,
+      "num_requests": 32,
+      "cache_alloc_len": 2048,
+      "dtype_label": "bf16",
+      "position_mode": "ragged",
+      "layout": "packed",
+      "request_mapping": "identity",
+      "profiled_iters": 20,
+      "warmup": 25,
+      "trace": "results/profiling/kernels/trace_cuda_fused_mha_b32_alloc2048_bf16_ragged.json",
+      "top_ops_by_self_device_time": [
+        {
+          "op": "void decode_kernels::(anonymous namespace)::fused_rope_kv_append_kernel<c10::BFloat16, long>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, c10::BFloat16*, float const*, float const*, long const*, long const*, long, int, int, int, long, long, long, long, long, long, long, long, long, long)",
+          "count": 20,
+          "self_device_us": 71.87200000000001,
+          "total_device_us": 71.87200000000001
+        }
+      ]
+    },
+    {
+      "device_events_total": 40,
+      "kernel_events_total": 40,
+      "kernels_per_invocation": 2.0,
+      "device_time_total_us": 58.240000000000016,
+      "device_time_per_invocation_us": 2.912000000000001,
+      "distinct_kernels": 2,
+      "by_kernel": [
+        {
+          "name": "void decode_kernels::(anonymous namespace)::rope_kernel<c10::BFloat16, long>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, float const*, float const*, long const*, long, int, int, int, long, long, long, long, long, long)",
+          "count": 20,
+          "total_us": 29.95200000000001,
+          "per_invocation": 1.0
+        },
+        {
+          "name": "void decode_kernels::(anonymous namespace)::kv_append_kernel<c10::BFloat16, long>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, long const*, long const*, long, int, int, long, long, long, long, long, long)",
+          "count": 20,
+          "total_us": 28.288000000000007,
+          "per_invocation": 1.0
+        }
+      ],
+      "impl": "cuda_separate",
+      "config": "gqa_b1_alloc2048_bf16_ragged",
+      "head_label": "gqa",
+      "num_q_heads": 32,
+      "num_kv_heads": 8,
+      "head_dim": 128,
+      "num_requests": 1,
+      "cache_alloc_len": 2048,
+      "dtype_label": "bf16",
+      "position_mode": "ragged",
+      "layout": "packed",
+      "request_mapping": "identity",
+      "profiled_iters": 20,
+      "warmup": 25,
+      "trace": "results/profiling/kernels/trace_cuda_separate_gqa_b1_alloc2048_bf16_ragged.json",
+      "top_ops_by_self_device_time": [
+        {
+          "op": "void decode_kernels::(anonymous namespace)::rope_kernel<c10::BFloat16, long>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, float const*, float const*, long const*, long, int, int, int, long, long, long, long, long, long)",
+          "count": 20,
+          "self_device_us": 29.95199999999963,
+          "total_device_us": 29.95199999999963
+        },
+        {
+          "op": "void decode_kernels::(anonymous namespace)::kv_append_kernel<c10::BFloat16, long>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, long const*, long const*, long, int, int, long, long, long, long, long, long)",
+          "count": 20,
+          "self_device_us": 28.28800000000024,
+          "total_device_us": 28.28800000000024
+        }
+      ]
+    },
+    {
+      "device_events_total": 20,
+      "kernel_events_total": 20,
+      "kernels_per_invocation": 1.0,
+      "device_time_total_us": 27.714000000000002,
+      "device_time_per_invocation_us": 1.3857000000000002,
+      "distinct_kernels": 1,
+      "by_kernel": [
+        {
+          "name": "void decode_kernels::(anonymous namespace)::fused_rope_kv_append_kernel<c10::BFloat16, long>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, c10::BFloat16*, float const*, float const*, long const*, long const*, long, int, int, int, long, long, long, long, long, long, long, long, long, long)",
+          "count": 20,
+          "total_us": 27.714000000000002,
+          "per_invocation": 1.0
+        }
+      ],
+      "impl": "cuda_fused",
+      "config": "gqa_b1_alloc2048_bf16_ragged",
+      "head_label": "gqa",
+      "num_q_heads": 32,
+      "num_kv_heads": 8,
+      "head_dim": 128,
+      "num_requests": 1,
+      "cache_alloc_len": 2048,
+      "dtype_label": "bf16",
+      "position_mode": "ragged",
+      "layout": "packed",
+      "request_mapping": "identity",
+      "profiled_iters": 20,
+      "warmup": 25,
+      "trace": "results/profiling/kernels/trace_cuda_fused_gqa_b1_alloc2048_bf16_ragged.json",
+      "top_ops_by_self_device_time": [
+        {
+          "op": "void decode_kernels::(anonymous namespace)::fused_rope_kv_append_kernel<c10::BFloat16, long>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, c10::BFloat16*, float const*, float const*, long const*, long const*, long, int, int, int, long, long, long, long, long, long, long, long, long, long)",
+          "count": 20,
+          "self_device_us": 27.7139999999995,
+          "total_device_us": 27.7139999999995
+        }
+      ]
+    },
+    {
+      "device_events_total": 40,
+      "kernel_events_total": 40,
+      "kernels_per_invocation": 2.0,
+      "device_time_total_us": 72.51400000000001,
+      "device_time_per_invocation_us": 3.6257000000000006,
+      "distinct_kernels": 2,
+      "by_kernel": [
+        {
+          "name": "void decode_kernels::(anonymous namespace)::rope_kernel<c10::BFloat16, long>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, float const*, float const*, long const*, long, int, int, int, long, long, long, long, long, long)",
+          "count": 20,
+          "total_us": 43.20100000000001,
+          "per_invocation": 1.0
+        },
+        {
+          "name": "void decode_kernels::(anonymous namespace)::kv_append_kernel<c10::BFloat16, long>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, long const*, long const*, long, int, int, long, long, long, long, long, long)",
+          "count": 20,
+          "total_us": 29.31300000000001,
+          "per_invocation": 1.0
+        }
+      ],
+      "impl": "cuda_separate",
+      "config": "gqa_b32_alloc2048_bf16_ragged",
+      "head_label": "gqa",
+      "num_q_heads": 32,
+      "num_kv_heads": 8,
+      "head_dim": 128,
+      "num_requests": 32,
+      "cache_alloc_len": 2048,
+      "dtype_label": "bf16",
+      "position_mode": "ragged",
+      "layout": "packed",
+      "request_mapping": "identity",
+      "profiled_iters": 20,
+      "warmup": 25,
+      "trace": "results/profiling/kernels/trace_cuda_separate_gqa_b32_alloc2048_bf16_ragged.json",
+      "top_ops_by_self_device_time": [
+        {
+          "op": "void decode_kernels::(anonymous namespace)::rope_kernel<c10::BFloat16, long>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, float const*, float const*, long const*, long, int, int, int, long, long, long, long, long, long)",
+          "count": 20,
+          "self_device_us": 43.200999999999794,
+          "total_device_us": 43.200999999999794
+        },
+        {
+          "op": "void decode_kernels::(anonymous namespace)::kv_append_kernel<c10::BFloat16, long>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, long const*, long const*, long, int, int, long, long, long, long, long, long)",
+          "count": 20,
+          "self_device_us": 29.313000000000557,
+          "total_device_us": 29.313000000000557
+        }
+      ]
+    },
+    {
+      "device_events_total": 20,
+      "kernel_events_total": 20,
+      "kernels_per_invocation": 1.0,
+      "device_time_total_us": 43.58300000000001,
+      "device_time_per_invocation_us": 2.179150000000001,
+      "distinct_kernels": 1,
+      "by_kernel": [
+        {
+          "name": "void decode_kernels::(anonymous namespace)::fused_rope_kv_append_kernel<c10::BFloat16, long>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, c10::BFloat16*, float const*, float const*, long const*, long const*, long, int, int, int, long, long, long, long, long, long, long, long, long, long)",
+          "count": 20,
+          "total_us": 43.58300000000001,
+          "per_invocation": 1.0
+        }
+      ],
+      "impl": "cuda_fused",
+      "config": "gqa_b32_alloc2048_bf16_ragged",
+      "head_label": "gqa",
+      "num_q_heads": 32,
+      "num_kv_heads": 8,
+      "head_dim": 128,
+      "num_requests": 32,
+      "cache_alloc_len": 2048,
+      "dtype_label": "bf16",
+      "position_mode": "ragged",
+      "layout": "packed",
+      "request_mapping": "identity",
+      "profiled_iters": 20,
+      "warmup": 25,
+      "trace": "results/profiling/kernels/trace_cuda_fused_gqa_b32_alloc2048_bf16_ragged.json",
+      "top_ops_by_self_device_time": [
+        {
+          "op": "void decode_kernels::(anonymous namespace)::fused_rope_kv_append_kernel<c10::BFloat16, long>(c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16 const*, c10::BFloat16*, c10::BFloat16*, c10::BFloat16*, float const*, float const*, long const*, long const*, long, int, int, int, long, long, long, long, long, long, long, long, long, long)",
+          "count": 20,
+          "self_device_us": 43.58299999999933,
+          "total_device_us": 43.58299999999933
+        }
+      ]
+    }
+  ]
+}
