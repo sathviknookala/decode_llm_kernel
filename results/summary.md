@@ -200,11 +200,11 @@ Against the compiled-plus-graphs ceiling the fused kernel runs at a median **0.5
 
 | impl | config | kernels/invocation | distinct | device us/invocation |
 |---|---|---|---|---|
-| eager | mha_b1_alloc2048_bf16_ragged | 18.00 | 8 | 29.7 |
-| compile | mha_b1_alloc2048_bf16_ragged | 2.00 | 3 | 2.7 |
-| eager | mha_b32_alloc2048_bf16_ragged | 18.00 | 8 | 33.4 |
-| compile | mha_b32_alloc2048_bf16_ragged | 1.00 | 1 | 1.6 |
-| eager | gqa_b1_alloc2048_bf16_ragged | 18.00 | 8 | 29.7 |
-| compile | gqa_b1_alloc2048_bf16_ragged | 2.00 | 3 | 2.5 |
-| eager | gqa_b32_alloc2048_bf16_ragged | 18.00 | 8 | 31.1 |
-| compile | gqa_b32_alloc2048_bf16_ragged | 2.00 | 2 | 2.4 |
+| eager | mha_b1_alloc2048_bf16_ragged | 18.00 | 8 | 29.9 |
+| compile | mha_b1_alloc2048_bf16_ragged | 2.00 | 2 | 2.7 |
+| eager | mha_b32_alloc2048_bf16_ragged | 18.00 | 8 | 33.7 |
+| compile | mha_b32_alloc2048_bf16_ragged | 1.00 | 1 | 1.7 |
+| eager | gqa_b1_alloc2048_bf16_ragged | 18.00 | 8 | 29.9 |
+| compile | gqa_b1_alloc2048_bf16_ragged | 2.00 | 2 | 2.6 |
+| eager | gqa_b32_alloc2048_bf16_ragged | 18.00 | 8 | 31.3 |
+| compile | gqa_b32_alloc2048_bf16_ragged | 2.00 | 2 | 2.5 |
