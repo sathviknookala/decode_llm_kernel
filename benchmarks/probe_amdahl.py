@@ -141,7 +141,8 @@ def measure(model, cfg, mode, rung, args, arch, device="cuda"):
         row.update({"amortized_step_ms": "", "synchronized_step_ms": "",
                     "error": f"{type(e).__name__}: {detail}"})
         print(f"    ERROR {type(e).__name__}: {detail}", flush=True)
-    dl.release(cache)
+    cache = None  # the only remaining reference; release() cannot free it from inside
+    dl.release()
     return row
 
 

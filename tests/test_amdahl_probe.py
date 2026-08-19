@@ -300,3 +300,45 @@ def test_a_single_repeat_reports_zero_spread_rather_than_failing():
     assert s["amortized_stdev_ms"] == 0.0
     assert s["amortized_spread_pct"] == 0.0
     assert s["repeats"] == 1
+
+
+def test_release_takes_no_objects_because_it_could_never_free_them(monkeypatch):
+    """It took *objs and did `del o` per object, which unbinds the local name and frees nothing:
+    the caller's reference and the argument tuple both outlive the loop, so gc.collect() ran
+    while every object was still reachable."""
+    import inspect
+    from benchmarks import decode_loop as dl
+    assert list(inspect.signature(dl.release).parameters) == []
+
+
+def test_release_collects_what_the_caller_has_dropped(monkeypatch):
+    import gc
+    import torch
+    from benchmarks import decode_loop as dl
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+
+    collected = []
+
+    class Tracked:
+        def __del__(self):
+            collected.append(True)
+
+    holder = [Tracked()]
+    dl.release()
+    assert collected == [], "still referenced, so nothing should have been collected"
+    holder.clear()
+    dl.release()
+    gc.collect()
+    assert collected == [True]
+
+
+def test_measure_drops_its_cache_before_releasing():
+    """A multi-GB KV cache: empty_cache() while it is still referenced returns nothing to the
+    driver, and this probe is the one that OOMs at the margins."""
+    import inspect
+    import benchmarks.probe_amdahl as pa
+    src = inspect.getsource(pa.measure)
+    assert "cache = None" in src.split("except Exception")[-1], \
+        "measure must drop its cache reference before calling release()"
+    assert "dl.release()" in src and "dl.release(cache)" not in src

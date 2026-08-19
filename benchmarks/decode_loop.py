@@ -134,9 +134,14 @@ def make_step(callable_, cache, cfg, prefill_len, device="cuda"):
     return step
 
 
-def release(*objs):
-    for o in objs:
-        del o
+def release():
+    """Return freed blocks to the driver. The caller must already have dropped its references.
+
+    This took *objs and did `del o` per object, which unbinds the local name and frees nothing:
+    the caller's own reference and this function's argument tuple both outlive the loop, so
+    gc.collect() ran while every object was still reachable and empty_cache() had nothing to
+    give back. A helper cannot free what its caller still holds, so it no longer pretends to.
+    """
     gc.collect()
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
