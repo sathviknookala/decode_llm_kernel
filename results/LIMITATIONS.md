@@ -9,6 +9,68 @@ provenance for each run is in the adjacent `*.env.json`.
 
 ---
 
+## `raw/operator_kernels_v1.csv` (+ `operator_kernels_v1.env.json`)
+
+3812 rows (3808 timed), eight impls, 480/480 declared units, 0 validation failures, 4 budget
+skips. Clean `46e47a0`, one `run_segment`, ~27 minutes. This is the file `results/summary.md` is
+generated from and the only committed measurement of the custom kernels; the four-impl
+`operator_baseline_v3.csv` remains as the independent baseline.
+
+**The fusion ratio is not ordering-controlled.** `benchmark_operator.py` is not a bracketed
+ladder -- there is no `ordering_drift` column -- so the median **1.82x** of `cuda_separate` over
+`cuda_fused` carries whatever first-rung artifact the impl ordering induces. That artifact was
+measured at up to **25%** on this rig for the ladder probes, which is larger than the effects some
+sections of this file discuss. Two things bound the risk here and neither removes it: the ratio is
+between two impls timed inside one configuration rather than across a ladder, and it reproduces
+across 476 configurations, four batch sizes, three dtypes and four head layouts. **Read the
+direction as established and the third digit as noise.**
+
+**It is not a decode-latency result, and the file cannot tell you that.** `raw/amdahl_probe.csv`
+measured *doubling* this whole operation inside a real Mistral-7B decode step at **0.0-0.9%** under
+both compiled modes. A kernel that is 1.8x faster here does not shorten a step measurably. Every
+ratio in this file is an operator microbenchmark; quoting one as a serving win would contradict
+the artifact two sections down.
+
+**Quote `amortized_call_ms`, never `device_median_ms`, for anything involving a custom rung.**
+CUDA-event bracketing costs 4.3 us on a call that launches nothing (`raw/graph_floor_probe.csv`)
+and `cuda_fused` is ~3 us of work, so more than half of its event median is instrument. The same
+floor is why `device_median_ms` reports `graph_compile` at 8.3x eager where the amortized route
+reports 12.4x: the floor sits in the denominator and biases graph and custom ratios *down*.
+
+**The graph twins of the custom rungs are in this file for completeness and are the wrong rungs
+to quote.** `graph_cuda_fused` is **1.78x slower** than plain `cuda_fused`, because replay plus the
+position `copy_` is ~5 us against a ~3 us kernel -- graphs pay off against eager's 18 launches,
+not against one. The fused kernel's best form is ungraphed. `graph_cuda_separate` is likewise
+within noise of, or worse than, its direct rung.
+
+**The 19 configurations where `cuda_fused` loses to `graph_compile` are a memory-bound corner, not
+a launch-overhead result.** All 19 are b=128 on `mha` and `mha96` (0.68x and 0.77x), the widest KV
+layouts, where the kernel already moves 614 GB/s logical against a 553 GB/s streaming reference.
+Fusion still pays 1.64-1.76x there; what inverts is the comparison against PyTorch, because
+inductor's generated kernel is better on the memory path. By batch the advantage against the
+ceiling runs 1.87x / 1.84x / 1.50x / 1.06x at b=1/8/32/128. Through b=32 that is a roughly fixed
+absolute gap -- 2.76, 2.68 and 2.08 us -- so the ratio falls because the denominator grows rather
+than because the kernel degrades. At b=128 the median gap is only 0.37 us, and that is a genuine
+change of regime rather than more of the same: it is +2.04 us on `mqa`, which never leaves the
+overhead-bound regime, and negative on `mha` and `mha96`.
+
+**`pct_of_empirical_bw` is worse here than in v3, for the same reason it was wrong there.** 40 of
+3808 rows exceed 100%, peaking at **191% empirical / 285% scattered** (`cuda_fused`, mha, b=128,
+fp32, uniform). A faster implementation against an unchanged logical byte count inflates the
+column further. It is not an efficiency score. **Blocker:** real traffic still needs Nsight
+Compute counters, still blocked by `ERR_NVGPUCTRPERM`.
+
+**Every timed tensor is synthetic `randn`, and the cache is contiguous.** The four head layouts
+are real models' shapes but no real weights are loaded anywhere in this file. Paged or fragmented
+cache addressing is Checkpoint F and is not represented.
+
+**The four skips are a preview of why paged caches exist.** `mha` and `mha96` at
+`b=128 alloc=2048 fp32` need 17.2 GB and 12.9 GB of peak contiguous cache against a 12 GB budget,
+so they are recorded as `impl=skipped` rows in both position modes rather than silently dropped.
+The two head layouts with the most traffic are therefore unmeasured at the largest fp32 point.
+
+---
+
 ## `raw/operator_baseline_v3.csv` (+ `operator_baseline_v3.env.json`)
 
 1908 rows (1904 timed), four impls, four head layouts, 0 validation failures. Provenance is a
@@ -195,20 +257,25 @@ fraction. Nothing here transfers to b=32.
 
 ## `raw/cache_read_probe.csv` (+ `cache_read_probe.env.json`)
 
-128 timed rows, no errors, no skips. Four arms -- SDPA on head-major, SDPA on a transposed
-token-major view, the same with the conversion materialized, and a pure read floor -- across four
-head layouts, b in {1, 32} and ctx in {128, 512, 2048, 8192}, bf16 only.
+160 rows over 32/32 units, no errors, no skips. Four arms -- SDPA on head-major, SDPA on a
+transposed token-major view, the same with the conversion materialized, and a pure read floor --
+across four head layouts, b in {1, 32} and ctx in {128, 512, 2048, 8192}, bf16 only. The ladder is
+bracketed, so head-major is measured twice per unit and the fifth rung is the control, not a
+fifth arm.
 
 **This is the read side measured alone, not a full attention layer.** It prices the consumer of
 the cache this operator writes. Nothing here times a write and a read in one step, so a layout's
 net effect is still two numbers added together.
 
-**The 1.007 view figure is inside the ordering drift this file cannot report.** Written before the
-ladder was bracketed, so `head_major` is both the baseline and the first arm measured. A later
-smoke run with the bracket showed a closing `head_major` rung at 0.977 on a small configuration,
-i.e. drift of the same size as the effect. The **2.65x median copy penalty is far above any drift
-observed** and stands; the "token-major is free" conclusion is consistent with the data but is not
-separated from drift until a re-run.
+**The view figure is now separated from ordering drift, and it survives.** An earlier version of
+this file was written before the ladder was bracketed, so `head_major` was both the baseline and
+the first arm measured and the 1.007 could not be told apart from run ordering. Re-run bracketed:
+`ordering_drift` is a median **1.0018** over 32 ladders (range 0.9907-1.0391), and the transposed
+view reads a median **1.006** of head-major (worst 1.123). The effect is inside its own control,
+which is the strongest form this claim can take -- it does not show that the view is free, it
+shows that any cost is below what this instrument can distinguish from ordering. The **2.65x
+median copy penalty (worst 5.62x)** is two orders above the drift and was never at risk. Neither
+figure moved in the re-run (1.007 -> 1.006, 2.65 -> 2.65).
 
 **`read_gbps` is not DRAM bandwidth at the narrow end.** Same trap as `pct_of_empirical_bw`: a
 cache that fits in L2 is served from L2, and the small configurations exceed the 553 GB/s
@@ -365,14 +432,25 @@ that change; treat its ±few-percent differences as noise.
 
 ## `profiling/` (`profile_summary.json`, `trace_*.json`, `nsys_*_cuda_gpu_kern_sum.csv`)
 
+`profile_summary.json` and its traces were re-exported together at `d32af14`; the `nsys_*` kernel
+summaries are older and were not.
+
 **Kernel counts are exact; the attribution of the remaining time is inferred.** The traces
 establish kernels per invocation and device time per invocation directly. That the rest of the
 measured span is host-side dispatch follows from the arithmetic (1.8 µs of GPU work inside a
-25.5 µs call). These v2-era traces predate the graph comparison; use the subsequent baseline's
-graph-vs-direct latency for the measured recoverable launch share.
+25.5 µs call). For the *measured* recoverable launch share use the baselines' graph-vs-direct
+latency instead, which is where 62-69% comes from.
+
+**`distinct_kernels` counted non-kernel device events until `1c05249`.** The name table was keyed
+over kernels, memcpys and memsets alike, so the compiled path at b=1 was reported as 2.00 kernels
+per invocation and **3 distinct** -- the third being a `Memcpy DtoD`. Both are now keyed off kernel
+events and the file was re-exported, but any quote of "distinct kernels" taken from this file
+before that commit is high by the number of memcpy and memset names present.
 
 **Profiling perturbs what it measures.** Reported device times come from profiled runs and are
-not the timing path's numbers; use `operator_baseline_v3.csv` for latency.
+not the timing path's numbers; use `operator_kernels_v1.csv` for latency. Re-exporting moved
+device time per invocation by 0.7-4.9% between two runs of identical arguments, which is the scale
+of run-to-run variation to expect from these numbers.
 
 **Narrow config coverage.** bf16, ragged positions, `alloc=2048`, b∈{1,32}, MHA and GQA only.
 Kernel counts for other dtypes and batch sizes are not established, though the inductor fusion
@@ -400,6 +478,30 @@ rather than profiling every configuration first.
 built from it. Treat the first real capture as also testing the parser: a column-name change
 between ncu versions would surface as zero metric rows, which the reporter refuses rather than
 reporting as zero traffic.
+
+---
+
+## `profiling/kernels/` (`profile_summary.json`, `trace_*.json`)
+
+The custom rungs profiled separately, opt-in exactly as they are in the sweep. Reproduce with
+`python benchmarks/profile_operator.py --impls cuda_separate cuda_fused --outdir
+results/profiling/kernels`.
+
+**This is the only place the fusion ablation's premise is measured rather than argued.**
+`cuda_separate` is exactly 2.00 kernels per invocation and 2 distinct (`rope_kernel`,
+`kv_append_kernel`); `cuda_fused` is exactly 1.00 and 1 (`fused_rope_kv_append_kernel`), at every
+representative configuration. Before this the launch count was read off the source.
+
+**Its device-time ratio corroborates the sweep and does not replace it.** Summing per-kernel
+device time, fusion is 1.63-2.10x here against the sweep's 1.82x from amortized wall clock --
+independent instruments (CUPTI kernel spans against a host timing loop) agreeing within the spread
+of either. But these are profiled runs at `--iters 20`, so the absolute microsecond figures are
+not the timing path's and should not be quoted as latency.
+
+**Same narrow coverage as the sibling directory.** bf16, ragged positions, `alloc=2048`,
+b in {1, 32}, MHA and GQA only. The launch counts are structural and will not vary with dtype or
+batch, but nothing here covers `mqa`, `mha96`, or the b=128 memory-bound corner where the fused
+kernel loses to `graph_compile`.
 
 ---
 
